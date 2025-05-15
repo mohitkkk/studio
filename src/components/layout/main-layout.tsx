@@ -12,7 +12,7 @@ import Link from 'next/link';
 export default function MainLayout({ children }: PropsWithChildren) {
   return (
     <div className="flex min-h-screen">
-      <Sidebar collapsible="icon" variant="sidebar" side="left" className="border-r border-sidebar-border">
+      <Sidebar collapsible="icon" variant="floating" side="left" className="border-r border-sidebar-border">
         <SidebarHeader className="p-4 flex items-center justify-between">
            <Link href="/" className="flex items-center gap-2">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-8 h-8 text-primary">
@@ -62,5 +62,3 @@ export default function MainLayout({ children }: PropsWithChildren) {
     </div>
   );
 }
-
-    
