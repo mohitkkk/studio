@@ -21,6 +21,7 @@ const CHAT_HISTORY_KEY = "nebulaChatHistory";
 
 const saveChatSession = (session: ChatSession) => {
   try {
+    if (typeof window === 'undefined') return;
     const history = loadChatHistory();
     const existingIndex = history.findIndex(s => s.id === session.id);
     if (existingIndex > -1) {
@@ -36,6 +37,7 @@ const saveChatSession = (session: ChatSession) => {
 
 const loadChatHistory = (): ChatSession[] => {
   try {
+    if (typeof window === 'undefined') return [];
     const historyJson = localStorage.getItem(CHAT_HISTORY_KEY);
     return historyJson ? JSON.parse(historyJson) : [];
   } catch (error) {
@@ -144,10 +146,13 @@ export default function ChatPageClient() {
         // For now, let's pretend citations are part of the answer string or a separate field
       } else {
          // Fallback or general knowledge chat if no document
-        botResponseContent = "Please upload a document to ask questions about its content, or I can try to answer generally.";
         // Simulate a generic response if no RAG context
-        // const genericResponse = await someGenericChatFlow({ query: input });
-        // botResponseContent = genericResponse.answer;
+        const queryInput: RagBasedChatInput = {
+            query: input,
+            documentContent: "", 
+        };
+        const genericResponse = await ragBasedChat(queryInput);
+        botResponseContent = genericResponse.answer;
       }
       
       const botMessage: ChatMessage = {
@@ -195,15 +200,12 @@ export default function ChatPageClient() {
       const reader = new FileReader();
       reader.onload = async (e) => {
         const fileDataUri = e.target?.result as string;
-        // For RAG, we might need raw text. For summarization, data URI is fine.
-        // This is a simplified text extraction. Real-world might need more robust parsing.
-        if (file.type === "text/plain") {
+        
+        if (file.type === "text/plain" || file.type === "text/markdown" || file.type.startsWith("application/json") || file.type.startsWith("text/")) {
           setDocumentContent(await file.text());
         } else {
-          // For non-plain text, we'll just use the URI for summarization
-          // and won't set documentContent for RAG as it expects raw text.
-          // This part can be expanded with PDF/DOCX parsers.
-           toast({ title: "File Type", description: "For RAG, plain text files work best. Summarization will proceed.", variant: "default" });
+           toast({ title: "File Type for Chat", description: "For direct chat context, plain text, markdown or similar text-based files work best. Summarization will still proceed for other types.", variant: "default" });
+           setDocumentContent(null); // Explicitly set to null if not a directly readable text type for chat
         }
 
         try {
@@ -244,7 +246,7 @@ export default function ChatPageClient() {
   };
 
   return (
-    <div className="flex flex-col h-full max-h-[calc(100vh-var(--header-height,0px)-3rem)]">
+    <div className="flex flex-col h-full">
       <Card className="flex-1 flex flex-col glassmorphic border-0 shadow-2xl animated-smoke-bg">
         <CardHeader className="p-4 border-b border-border/50">
           <div className="flex justify-between items-center">
@@ -260,7 +262,7 @@ export default function ChatPageClient() {
                 <span>{uploadedFile.name}</span>
                 {isSummarizing && <LoadingSpinner size="sm" dotClassName="bg-primary-foreground" />}
               </div>
-              <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => { setUploadedFile(null); setDocumentContent(null); setDocumentSummary(null); }}>
+              <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => { setUploadedFile(null); setDocumentContent(null); setDocumentSummary(null); if (fileInputRef.current) fileInputRef.current.value = ""; }}>
                 <Trash2 size={14} />
               </Button>
             </div>
@@ -322,12 +324,12 @@ export default function ChatPageClient() {
               ref={fileInputRef}
               onChange={handleFileChange}
               className="hidden"
-              accept=".txt,.pdf,.md,.docx" 
+              accept=".txt,.pdf,.md,.docx,.json,text/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" 
             />
             <Textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={uploadedFile ? `Ask about ${uploadedFile.name}...` : "Type your message or upload a file..."}
+              placeholder={documentContent ? `Ask about ${uploadedFile?.name}...` : (uploadedFile ? `Summarized ${uploadedFile.name}. Ask about its summary or type a general query...` : "Type your message or upload a file...")}
               className="flex-1 resize-none min-h-[40px] max-h-[120px] glassmorphic"
               rows={1}
               onKeyDown={(e) => {
@@ -338,7 +340,7 @@ export default function ChatPageClient() {
               }}
               disabled={isLoading || isSummarizing}
             />
-            <Button type="submit" size="icon" disabled={isLoading || isSummarizing} aria-label="Send message">
+            <Button type="submit" size="icon" disabled={isLoading || !input.trim()} aria-label="Send message">
               <Send className="h-5 w-5" />
             </Button>
           </form>
@@ -348,4 +350,3 @@ export default function ChatPageClient() {
   );
 }
 
-    
