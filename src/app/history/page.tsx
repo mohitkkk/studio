@@ -8,7 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter }
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { History, Search, Trash2, Edit3, RefreshCcw, MessageSquarePlus, Eye, SortAsc, SortDesc } from "lucide-react";
 import LoadingSpinner from "@/components/ui/loading-spinner";
 import type { ChatSession } from "@/types";
@@ -184,11 +184,9 @@ export default function ChatHistoryPage() {
                         <Button variant="ghost" size="icon" onClick={() => handleReloadChat(session.id)} title="Reload Chat (copies ID)">
                           <Eye className="h-4 w-4" />
                         </Button>
-                        <DialogTrigger asChild>
-                          <Button variant="ghost" size="icon" onClick={() => openRenameDialog(session)} title="Rename Chat">
-                            <Edit3 className="h-4 w-4" />
-                          </Button>
-                        </DialogTrigger>
+                        <Button variant="ghost" size="icon" onClick={() => openRenameDialog(session)} title="Rename Chat">
+                          <Edit3 className="h-4 w-4" />
+                        </Button>
                         <AlertDialog>
                           <AlertDialogTrigger asChild>
                             <Button variant="ghost" size="icon" className="text-destructive hover:text-destructive-foreground hover:bg-destructive" title="Delete Chat">
