@@ -112,12 +112,10 @@ export default function MainLayout({ children }: PropsWithChildren) {
           <SidebarTrigger />
         </header>
         {/* This div is the direct parent of the page content (children) */}
-        <div className="flex-1 flex flex-col overflow-hidden p-4 sm:p-6 bg-background animated-smoke-bg">
+        <div className="flex-1 flex flex-col overflow-hidden bg-background">
            {children}
         </div>
       </SidebarInset>
     </div>
   );
 }
-
-    
