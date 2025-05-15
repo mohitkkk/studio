@@ -246,7 +246,7 @@ export default function ChatPageClient() {
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col flex-1">
       <Card className="flex-1 flex flex-col glassmorphic border-0 shadow-2xl animated-smoke-bg">
         <CardHeader className="p-4 border-b border-border/50">
           <div className="flex justify-between items-center">
@@ -274,8 +274,8 @@ export default function ChatPageClient() {
              </details>
           )}
         </CardHeader>
-        <ScrollArea className="flex-1 p-4" ref={scrollAreaRef}>
-          <div className="space-y-6">
+        <ScrollArea className="flex-1" ref={scrollAreaRef}>
+          <div className="space-y-6 p-4">
             {messages.map((msg) => (
               <div
                 key={msg.id}
