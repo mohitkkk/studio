@@ -80,7 +80,7 @@ export default function MainLayout({ children }: PropsWithChildren) {
           </div>
         </div>
 
-        <SidebarFooter className="p-4 mt-auto"> {/* mt-auto will ensure this stays at the bottom */}
+        <SidebarFooter className="p-4 pt-0 mt-auto"> {/* pt-0 to remove extra top padding, mt-auto will ensure this stays at the bottom */}
            {/* User Profile Card */}
            <div className="p-3 rounded-lg bg-card text-card-foreground shadow-md group-data-[collapsible=icon]:p-2">
             <div className="flex items-center gap-3 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:gap-2">
@@ -111,7 +111,7 @@ export default function MainLayout({ children }: PropsWithChildren) {
           </Link>
           <SidebarTrigger />
         </header>
-        <main className="flex-1 overflow-y-auto p-6 bg-background animated-smoke-bg">
+        <main className="flex-1 overflow-y-auto p-4 sm:p-6 bg-background animated-smoke-bg">
            {children}
         </main>
       </SidebarInset>
