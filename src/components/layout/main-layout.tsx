@@ -1,4 +1,3 @@
-
 "use client";
 
 import type { PropsWithChildren } from 'react';
@@ -6,24 +5,29 @@ import { Sidebar, SidebarInset, SidebarTrigger, SidebarHeader, SidebarContent, S
 import SidebarNav from './sidebar-nav';
 import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
-import { LogOut, Settings, FileText, FolderOpen, X } from 'lucide-react'; // Added X for potential file removal later
+import { LogOut, Settings, FileText, FolderOpen, X } from 'lucide-react'; 
 import Link from 'next/link';
 
 export default function MainLayout({ children }: PropsWithChildren) {
   return (
-    <div className="flex min-h-screen">
+    <div className="flex min-h-screen w-full overflow-hidden">
       <Sidebar collapsible="icon" variant="floating" side="left" className="">
         <SidebarHeader className="p-4 flex items-center justify-between">
-           <Link href="/" className="flex items-center gap-2">
+          {/* Fix legacyBehavior - replace nested <a> tags with className on Link */}
+          <Link href="/" className="flex items-center gap-2">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-8 h-8 text-primary">
               <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-5-9h2v2H7v-2zm4 0h2v2h-2v-2zm4 0h2v2h-2v-2z" />
             </svg>
             <h1 className="text-2xl font-semibold text-foreground group-data-[collapsible=icon]:hidden">NebulaChat</h1>
           </Link>
-          <div className="group-data-[collapsible=icon]:hidden">
-            <SidebarTrigger />
-          </div>
+          <SidebarTrigger className="flex-shrink-0 group-data-[collapsible=icon]:hidden" />
         </SidebarHeader>
+        
+        {/* Only show in collapsed mode with clear styling */}
+        <div className="hidden group-data-[collapsible=icon]:block px-2 mb-2">
+          <SidebarTrigger className="w-full flex justify-center p-1.5 rounded-md bg-muted/50 hover:bg-accent/60 transition-colors" />
+        </div>
+        
         <SidebarContent className="flex-1 p-4"> {/* SidebarNav goes here */}
           <SidebarNav />
         </SidebarContent>
@@ -37,11 +41,11 @@ export default function MainLayout({ children }: PropsWithChildren) {
             </h3>
             
             {/* File list area or placeholder text visible when expanded */}
-            <div className="space-y-1 text-xs mb-3 group-data-[collapsible=icon]:hidden min-h-[60px] max-h-[150px] overflow-y-auto">
+            <div className="space-y-1 text-xs mb-3 group-data-[collapsible=icon]:hidden min-h-[60px] max-h-[150px] overflow-y-hidden">
               <p className="text-muted-foreground italic px-1 py-2">
                 Use 'Manage Files' to add documents for chat context.
               </p>
-              {/* 
+              
               Example of file items to be added later:
               <div className="flex items-center justify-between p-1.5 rounded hover:bg-accent/50">
                 <FileText className="h-4 w-4 mr-2 shrink-0 text-muted-foreground" />
@@ -50,7 +54,7 @@ export default function MainLayout({ children }: PropsWithChildren) {
                   <X className="h-3 w-3 text-muted-foreground group-hover:text-destructive" />
                 </Button>
               </div>
-              */}
+             
             </div>
             
             {/* Icon and text for collapsed state */}
@@ -60,21 +64,17 @@ export default function MainLayout({ children }: PropsWithChildren) {
             </div>
             
             {/* Button visible when expanded */}
-            <Link href="/upload" passHref legacyBehavior>
-              <Button asChild variant="outline" size="sm" className="w-full group-data-[collapsible=icon]:hidden">
-                <a> {/* Anchor tag for proper Link behavior with Button */}
-                  <FolderOpen className="h-3.5 w-3.5 mr-1.5" />
-                  Manage Files
-                </a>
+            <Link href="/upload" className="w-full group-data-[collapsible=icon]:hidden">
+              <Button variant="outline" size="sm" className="w-full">
+                <FolderOpen className="h-3.5 w-3.5 mr-1.5" />
+                Manage Files
               </Button>
             </Link>
             
             {/* Icon Button visible when collapsed */}
-            <Link href="/upload" passHref legacyBehavior>
-              <Button asChild variant="ghost" size="icon" className="hidden group-data-[collapsible=icon]:flex w-full h-8 items-center justify-center mt-1 hover:bg-accent/80" title="Manage Files">
-                <a> {/* Anchor tag for proper Link behavior with Button */}
-                  <FolderOpen className="h-4 w-4" />
-                </a>
+            <Link href="/upload" className="hidden group-data-[collapsible=icon]:flex w-full h-8 items-center justify-center mt-1 hover:bg-accent/80" title="Manage Files">
+              <Button variant="ghost" size="icon">
+                <FolderOpen className="h-4 w-4" />
               </Button>
             </Link>
           </div>
@@ -100,9 +100,10 @@ export default function MainLayout({ children }: PropsWithChildren) {
           </div>
         </SidebarFooter>
       </Sidebar>
-      <SidebarInset className="flex-1 flex flex-col overflow-hidden">
+      <SidebarInset className="min-h-screen w-full flex flex-col overflow-y-hidden">
         {/* Header for mobile view or consistent header */}
-        <header className="p-4 md:hidden flex items-center justify-between border-b border-border"> {/* Added border for mobile header clarity */}
+        <header className="p-4 md:hidden flex items-center justify-between border-b border-border">
+          {/* Fix legacyBehavior - replace nested <a> tags with className on Link */}
           <Link href="/" className="flex items-center gap-2">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6 text-primary">
               <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-5-9h2v2H7v-2zm4 0h2v2h-2v-2zm4 0h2v2h-2v-2z" />
@@ -112,8 +113,8 @@ export default function MainLayout({ children }: PropsWithChildren) {
           <SidebarTrigger />
         </header>
         {/* This div is the direct parent of the page content (children) */}
-        <div className="flex-1 flex flex-col overflow-hidden bg-background">
-           {children}
+        <div className="min-h-screen flex flex-col justify-between items-baseline overflow-hidden bg-background">
+          {children}
         </div>
       </SidebarInset>
     </div>
