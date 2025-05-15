@@ -3,78 +3,87 @@
 @tailwind utilities;
 
 body {
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-ibm-plex-mono), monospace;
 }
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 0 0% 3.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 0 0% 3.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 0 0% 3.9%;
-    --primary: 0 0% 9%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 0 0% 96.1%;
-    --secondary-foreground: 0 0% 9%;
-    --muted: 0 0% 96.1%;
-    --muted-foreground: 0 0% 45.1%;
-    --accent: 0 0% 96.1%;
-    --accent-foreground: 0 0% 9%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 0 0% 89.8%;
-    --input: 0 0% 89.8%;
-    --ring: 0 0% 3.9%;
-    --chart-1: 12 76% 61%;
-    --chart-2: 173 58% 39%;
-    --chart-3: 197 37% 24%;
-    --chart-4: 43 74% 66%;
-    --chart-5: 27 87% 67%;
+    --background: 0 0% 0%; /* #000000 */
+    --foreground: 0 0% 100%; /* #FFFFFF */
+
+    --card: 0 0% 7.1%; /* #121212 */
+    --card-foreground: 0 0% 100%; /* #FFFFFF */
+
+    --popover: 0 0% 11.8%; /* #1E1E1E */
+    --popover-foreground: 0 0% 100%; /* #FFFFFF */
+
+    --primary: 152 100% 18.6%; /* #006039 */
+    --primary-foreground: 0 0% 100%; /* #FFFFFF */
+
+    --secondary: 0 0% 7.1%; /* #121212 */
+    --secondary-foreground: 0 0% 70.2%; /* #B3B3B3 */
+
+    --muted: 0 0% 11.8%; /* #1E1E1E */
+    --muted-foreground: 0 0% 40%; /* #666666 */
+
+    --accent: 152 100% 18.6%; /* #006039 */
+    --accent-foreground: 0 0% 100%; /* #FFFFFF */
+
+    --destructive: 0 100% 65%; /* #FF4C4C */
+    --destructive-foreground: 0 0% 100%; /* #FFFFFF */
+
+    --border: 0 0% 20%; /* #333333 */
+    --input: 0 0% 11.8%; /* #1E1E1E */
+    --ring: 152 100% 18.6%; /* #006039 */
+
     --radius: 0.5rem;
-    --sidebar-background: 0 0% 98%;
-    --sidebar-foreground: 240 5.3% 26.1%;
-    --sidebar-primary: 240 5.9% 10%;
-    --sidebar-primary-foreground: 0 0% 98%;
-    --sidebar-accent: 240 4.8% 95.9%;
-    --sidebar-accent-foreground: 240 5.9% 10%;
-    --sidebar-border: 220 13% 91%;
-    --sidebar-ring: 217.2 91.2% 59.8%;
+
+    --sidebar-background: 0 0% 0%; /* #000000 */
+    --sidebar-foreground: 0 0% 70.2%; /* #B3B3B3 */
+    --sidebar-primary: 152 100% 18.6%; /* #006039 */
+    --sidebar-primary-foreground: 0 0% 100%; /* #FFFFFF */
+    --sidebar-accent: 0 0% 7.1%; /* #121212 */
+    --sidebar-accent-foreground: 0 0% 100%; /* #FFFFFF */
+    --sidebar-border: 0 0% 20%; /* #333333 */
+    --sidebar-ring: 152 100% 18.6%; /* #006039 */
+
+    --chart-1: 152 100% 18.6%;
+    --chart-2: 152 80% 28.6%;
+    --chart-3: 152 70% 38.6%;
+    --chart-4: 152 60% 48.6%;
+    --chart-5: 152 50% 58.6%;
   }
+
+  /* Force dark mode always */
   .dark {
-    --background: 0 0% 3.9%;
-    --foreground: 0 0% 98%;
-    --card: 0 0% 3.9%;
-    --card-foreground: 0 0% 98%;
-    --popover: 0 0% 3.9%;
-    --popover-foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 0 0% 9%;
-    --secondary: 0 0% 14.9%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 0 0% 14.9%;
-    --muted-foreground: 0 0% 63.9%;
-    --accent: 0 0% 14.9%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 0 0% 14.9%;
-    --input: 0 0% 14.9%;
-    --ring: 0 0% 83.1%;
-    --chart-1: 220 70% 50%;
-    --chart-2: 160 60% 45%;
-    --chart-3: 30 80% 55%;
-    --chart-4: 280 65% 60%;
-    --chart-5: 340 75% 55%;
-    --sidebar-background: 240 5.9% 10%;
-    --sidebar-foreground: 240 4.8% 95.9%;
-    --sidebar-primary: 224.3 76.3% 48%;
+    --background: 0 0% 0%;
+    --foreground: 0 0% 100%;
+    --card: 0 0% 7.1%;
+    --card-foreground: 0 0% 100%;
+    --popover: 0 0% 11.8%;
+    --popover-foreground: 0 0% 100%;
+    --primary: 152 100% 18.6%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 0 0% 7.1%;
+    --secondary-foreground: 0 0% 70.2%;
+    --muted: 0 0% 11.8%;
+    --muted-foreground: 0 0% 40%;
+    --accent: 152 100% 18.6%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 100% 65%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 0 0% 20%;
+    --input: 0 0% 11.8%;
+    --ring: 152 100% 18.6%;
+
+    --sidebar-background: 0 0% 0%;
+    --sidebar-foreground: 0 0% 70.2%;
+    --sidebar-primary: 152 100% 18.6%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 240 3.7% 15.9%;
-    --sidebar-accent-foreground: 240 4.8% 95.9%;
-    --sidebar-border: 240 3.7% 15.9%;
-    --sidebar-ring: 217.2 91.2% 59.8%;
+    --sidebar-accent: 0 0% 7.1%;
+    --sidebar-accent-foreground: 0 0% 100%;
+    --sidebar-border: 0 0% 20%;
+    --sidebar-ring: 152 100% 18.6%;
   }
 }
 
@@ -84,5 +93,105 @@ body {
   }
   body {
     @apply bg-background text-foreground;
+    /* Apply dark theme by default */
+    @apply dark;
   }
 }
+
+/* Glassmorphism utility */
+.glassmorphic {
+  background: rgba(255, 255, 255, 0.05); /* Subtle white tint on dark background */
+  backdrop-filter: blur(10px) saturate(180%);
+  -webkit-backdrop-filter: blur(10px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.1); /* Subtle border */
+  border-radius: var(--radius);
+}
+
+/* Pulsing dot animation */
+.pulsing-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background-color: hsl(var(--primary));
+  border-radius: 50%;
+  animation: pulse 1.5s infinite ease-in-out;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(0.75);
+  }
+}
+
+/* Animated smoke placeholder */
+.animated-smoke-bg {
+  position: relative;
+  overflow: hidden; /* Important to contain pseudo-elements */
+}
+
+.animated-smoke-bg::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-image: radial-gradient(circle at 20% 20%, hsla(var(--primary) / 0.1), transparent 40%),
+                    radial-gradient(circle at 80% 70%, hsla(var(--primary) / 0.05), transparent 30%);
+  animation: smoke-drift 20s infinite linear;
+  z-index: 0; /* Ensure it's behind content */
+  opacity: 0.5;
+}
+
+@keyframes smoke-drift {
+  0% {
+    transform: translate(0, 0) rotate(0deg);
+  }
+  25% {
+    transform: translate(5px, 10px) rotate(5deg);
+  }
+  50% {
+    transform: translate(-5px, -10px) rotate(-5deg);
+  }
+  75% {
+    transform: translate(10px, -5px) rotate(3deg);
+  }
+  100% {
+    transform: translate(0, 0) rotate(0deg);
+  }
+}
+
+/* Ensure content is above smoke */
+.animated-smoke-bg > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Custom scrollbar for webkit browsers */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: hsl(var(--secondary));
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--primary));
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--primary) / 0.8);
+}
+
+/* Ensure Next.js Image component fills its parent if needed for layouts */
+.next-image-fill {
+  object-fit: cover;
+}
+
+    
