@@ -209,4 +209,5 @@ export default function ConfigPage() {
         </CardFooter>
       </Card>
     </div>
-  
+  );
+}
