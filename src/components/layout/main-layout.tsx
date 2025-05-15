@@ -6,7 +6,7 @@ import { Sidebar, SidebarInset, SidebarTrigger, SidebarHeader, SidebarContent, S
 import SidebarNav from './sidebar-nav';
 import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
-import { LogOut, Settings, FileText, FolderOpen } from 'lucide-react'; // Added FileText, FolderOpen
+import { LogOut, Settings, FileText, FolderOpen, X } from 'lucide-react'; // Added X for potential file removal later
 import Link from 'next/link';
 
 export default function MainLayout({ children }: PropsWithChildren) {
@@ -60,15 +60,23 @@ export default function MainLayout({ children }: PropsWithChildren) {
             </div>
             
             {/* Button visible when expanded */}
-            <Button variant="outline" size="sm" className="w-full group-data-[collapsible=icon]:hidden">
-              <FolderOpen className="h-3.5 w-3.5 mr-1.5" />
-              Manage Files
-            </Button>
+            <Link href="/upload" passHref legacyBehavior>
+              <Button asChild variant="outline" size="sm" className="w-full group-data-[collapsible=icon]:hidden">
+                <a> {/* Anchor tag for proper Link behavior with Button */}
+                  <FolderOpen className="h-3.5 w-3.5 mr-1.5" />
+                  Manage Files
+                </a>
+              </Button>
+            </Link>
             
             {/* Icon Button visible when collapsed */}
-            <Button variant="ghost" size="icon" className="hidden group-data-[collapsible=icon]:flex w-full h-8 items-center justify-center mt-1 hover:bg-accent/80" title="Manage Files">
-              <FolderOpen className="h-4 w-4" />
-            </Button>
+            <Link href="/upload" passHref legacyBehavior>
+              <Button asChild variant="ghost" size="icon" className="hidden group-data-[collapsible=icon]:flex w-full h-8 items-center justify-center mt-1 hover:bg-accent/80" title="Manage Files">
+                <a> {/* Anchor tag for proper Link behavior with Button */}
+                  <FolderOpen className="h-4 w-4" />
+                </a>
+              </Button>
+            </Link>
           </div>
         </div>
 
