@@ -838,7 +838,6 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
           </form>
         </CardFooter>
       </Card>
-      
       {/* File selector dialog */}
       <Dialog open={isFileDialogOpen} onOpenChange={setIsFileDialogOpen}>
         <DialogContent className="sm:max-w-[600px] p-0">

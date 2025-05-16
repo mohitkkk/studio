@@ -205,7 +205,6 @@ export default function FileSelector({ selectedFiles, onSelectionChange, onClose
           </ScrollArea>
         )}
       </CardHeader>
-
       <CardContent className="p-3 flex-1 overflow-hidden">
         {isLoading ? (
           <div className="flex flex-col justify-center items-center h-[200px] gap-4">
@@ -325,7 +324,6 @@ export default function FileSelector({ selectedFiles, onSelectionChange, onClose
           </ScrollArea>
         )}
       </CardContent>
-
       <CardFooter className="p-3 pt-0 border-t flex justify-between">
         <div className="text-sm">
           {selectedFileIds.size} file{selectedFileIds.size !== 1 ? 's' : ''} selected

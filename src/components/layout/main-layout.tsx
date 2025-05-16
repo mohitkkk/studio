@@ -7,18 +7,20 @@ import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { LogOut, Settings, FileText, FolderOpen, X } from 'lucide-react'; 
 import Link from 'next/link';
+import { Logo } from '@/components/ui/logo';
+import { cn } from '@/lib/utils';
 
 export default function MainLayout({ children }: PropsWithChildren) {
   return (
     <div className="flex min-h-screen w-full overflow-hidden">
       <Sidebar collapsible="icon" variant="floating" side="left" className="">
         <SidebarHeader className="p-4 flex items-center justify-between">
-          {/* Fix legacyBehavior - replace nested <a> tags with className on Link */}
-          <Link href="/" className="flex items-center gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-8 h-8 text-primary">
-              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-5-9h2v2H7v-2zm4 0h2v2h-2v-2zm4 0h2v2h-2v-2z" />
-            </svg>
-            <h1 className="text-2xl font-semibold text-foreground group-data-[collapsible=icon]:hidden">NebulaChat</h1>
+          {/* Remove legacyBehavior prop and move className to the div */}
+          <Link href="/">
+            <div className="flex items-center gap-2">
+              <Logo className="h-6 w-6" />
+              <span className="font-bold">NebulaChat</span>
+            </div>
           </Link>
           <SidebarTrigger className="flex-shrink-0 group-data-[collapsible=icon]:hidden" />
         </SidebarHeader>
@@ -63,7 +65,7 @@ export default function MainLayout({ children }: PropsWithChildren) {
               <p className="text-[10px] text-muted-foreground mt-1 leading-tight">Files</p>
             </div>
             
-            {/* Button visible when expanded */}
+            {/* Remove legacyBehavior prop and update Link for "Manage Files" button */}
             <Link href="/upload" className="w-full group-data-[collapsible=icon]:hidden">
               <Button variant="outline" size="sm" className="w-full">
                 <FolderOpen className="h-3.5 w-3.5 mr-1.5" />
@@ -71,8 +73,11 @@ export default function MainLayout({ children }: PropsWithChildren) {
               </Button>
             </Link>
             
-            {/* Icon Button visible when collapsed */}
-            <Link href="/upload" className="hidden group-data-[collapsible=icon]:flex w-full h-8 items-center justify-center mt-1 hover:bg-accent/80" title="Manage Files">
+            {/* Remove legacyBehavior prop and update Link for collapsed icon button */}
+            <Link
+              href="/upload"
+              className="hidden group-data-[collapsible=icon]:flex w-full h-8 items-center justify-center mt-1 hover:bg-accent/80"
+              title="Manage Files">
               <Button variant="ghost" size="icon">
                 <FolderOpen className="h-4 w-4" />
               </Button>
@@ -80,7 +85,7 @@ export default function MainLayout({ children }: PropsWithChildren) {
           </div>
         </div>
 
-        <SidebarFooter className="p-4 pt-0 mt-auto"> {/* pt-0 to remove extra top padding, mt-auto will ensure this stays at the bottom */}
+        <SidebarFooter className="p-4 pt-0 mt-auto">
            {/* User Profile Card */}
            <div className="p-3 rounded-lg bg-card text-card-foreground shadow-md group-data-[collapsible=icon]:p-2">
             <div className="flex items-center gap-3 group-data-[collapsible=icon]:flex-col group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:gap-2">
@@ -103,12 +108,12 @@ export default function MainLayout({ children }: PropsWithChildren) {
       <SidebarInset className="min-h-screen w-full flex flex-col overflow-y-hidden">
         {/* Header for mobile view or consistent header */}
         <header className="p-4 md:hidden flex items-center justify-between border-b border-border">
-          {/* Fix legacyBehavior - replace nested <a> tags with className on Link */}
-          <Link href="/" className="flex items-center gap-2">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6 text-primary">
-              <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-5-9h2v2H7v-2zm4 0h2v2h-2v-2zm4 0h2v2h-2v-2z" />
-            </svg>
-            <h1 className="text-xl font-semibold text-foreground">NebulaChat</h1>
+          {/* Remove legacyBehavior prop from mobile Link as well */}
+          <Link href="/">
+            <div className="flex items-center gap-2">
+              <Logo className="h-6 w-6" />
+              <span className="font-bold">NebulaChat</span>
+            </div>
           </Link>
           <SidebarTrigger />
         </header>
