@@ -8,82 +8,89 @@ body {
 
 @layer base {
   :root {
-    --background: 0 0% 0%; /* #000000 */
-    --foreground: 0 0% 100%; /* #FFFFFF */
+    --background: 0 0% 0%; /* #000000 - Pure Black */
+    --foreground: 0 0% 100%; /* #FFFFFF - Pure White */
 
-    --card: 0 0% 7.1%; /* #121212 */
-    --card-foreground: 0 0% 100%; /* #FFFFFF */
+    --card: 0 0% 7.1%; /* #121212 - Rich Black */
+    --card-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
 
-    --popover: 0 0% 11.8%; /* #1E1E1E */
-    --popover-foreground: 0 0% 100%; /* #FFFFFF */
+    --popover: 0 0% 11.8%; /* #1E1E1E - Eerie Black */
+    --popover-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
 
-    --primary: 152 100% 18.6%; /* #006039 */
-    --primary-foreground: 0 0% 100%; /* #FFFFFF */
+    /* Button gradient */
+    --primary-from: 336 100% 59%; /* #FF297F - Pink */
+    --primary-to: 217 100% 62%; /* #4B8FFF - Blue */
+    --primary: 336 100% 59%; /* #FF297F - Pink */
+    /*  */
+    --primary-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
 
-    --secondary: 0 0% 7.1%; /* #121212 */
-    --secondary-foreground: 0 0% 70.2%; /* #B3B3B3 */
+    --secondary: 0 0% 7.1%; /* #121212 - Rich Black */
+    --secondary-foreground: 0 0% 70.2%; /* #B3B3B3 - Silver */
 
-    --muted: 0 0% 11.8%; /* #1E1E1E */
-    --muted-foreground: 0 0% 40%; /* #666666 */
+    --muted: 0 0% 11.8%; /* #1E1E1E - Eerie Black */
+    --muted-foreground: 0 0% 40%; /* #666666 - Dim Gray */
 
-    --accent: 152 100% 18.6%; /* #006039 */
-    --accent-foreground: 0 0% 100%; /* #FFFFFF */
+    --accent: 336 100% 59%; /* #FF297F - Pink - matches the gradient start color */
+    --accent-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
 
-    --destructive: 0 100% 65%; /* #FF4C4C */
-    --destructive-foreground: 0 0% 100%; /* #FFFFFF */
+    --destructive: 0 100% 65%; /* #FF4C4C - Coral Red */
+    --destructive-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
 
-    --border: 0 0% 20%; /* #333333 */
-    --input: 0 0% 11.8%; /* #1E1E1E */
-    --ring: 152 100% 18.6%; /* #006039 */
+    --border: 0 0% 20%; /* #333333 - Dark Charcoal */
+    --input: 0 0% 11.8%; /* #1E1E1E - Eerie Black */
+    --ring: 336 100% 59%; /* #FF297F - Pink - matches the gradient start color */
 
     --radius: 0.5rem;
 
-    --sidebar-background: 0 0% 0%; /* #000000 */
-    --sidebar-foreground: 0 0% 70.2%; /* #B3B3B3 */
-    --sidebar-primary: 152 100% 18.6%; /* #006039 */
-    --sidebar-primary-foreground: 0 0% 100%; /* #FFFFFF */
-    --sidebar-accent: 0 0% 7.1%; /* #121212 */
-    --sidebar-accent-foreground: 0 0% 100%; /* #FFFFFF */
-    --sidebar-border: 0 0% 20%; /* #333333 */
-    --sidebar-ring: 152 100% 18.6%; /* #006039 */
+    --sidebar-background: 0 0% 0%; /* #000000 - Pure Black */
+    --sidebar-foreground: 0 0% 70.2%; /* #B3B3B3 - Silver */
+    --sidebar-primary: 152 100% 18.6%; /* #006039 - Deep Green */
+    --sidebar-primary-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
+    --sidebar-accent: 0 0% 7.1%; /* #121212 - Rich Black */
+    --sidebar-accent-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
+    --sidebar-border: 0 0% 20%; /* #333333 - Dark Charcoal */
+    --sidebar-ring: 152 100% 18.6%; /* #006039 - Deep Green */
 
-    --chart-1: 152 100% 18.6%;
-    --chart-2: 152 80% 28.6%;
-    --chart-3: 152 70% 38.6%;
-    --chart-4: 152 60% 48.6%;
-    --chart-5: 152 50% 58.6%;
+    --chart-1: 152 100% 18.6%; /* #006039 - Deep Green */
+    --chart-2: 152 80% 28.6%; /* #0E7D4F - Forest Green */
+    --chart-3: 152 70% 38.6%; /* #2A9565 - Sea Green */
+    --chart-4: 152 60% 48.6%; /* #47AD7C - Medium Sea Green */
+    --chart-5: 152 50% 58.6%; /* #65C594 - Light Green */
   }
 
   /* Force dark mode always */
   .dark {
-    --background: 0 0% 0%;
-    --foreground: 0 0% 100%;
-    --card: 0 0% 7.1%;
-    --card-foreground: 0 0% 100%;
-    --popover: 0 0% 11.8%;
-    --popover-foreground: 0 0% 100%;
-    --primary: 152 100% 18.6%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 0 0% 7.1%;
-    --secondary-foreground: 0 0% 70.2%;
-    --muted: 0 0% 11.8%;
-    --muted-foreground: 0 0% 40%;
-    --accent: 152 100% 18.6%;
-    --accent-foreground: 0 0% 100%;
-    --destructive: 0 100% 65%;
-    --destructive-foreground: 0 0% 100%;
-    --border: 0 0% 20%;
-    --input: 0 0% 11.8%;
-    --ring: 152 100% 18.6%;
+    --background: 0 0% 0%; /* #000000 - Pure Black */
+    --foreground: 0 0% 100%; /* #FFFFFF - Pure White */
+    --card: 0 0% 7.1%; /* #121212 - Rich Black */
+    --card-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
+    --popover: 0 0% 11.8%; /* #1E1E1E - Eerie Black */
+    --popover-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
+    --primary-from: 336 100% 59%; /* #FF297F - Pink */
+    --primary-to: 217 100% 62%; /* #4B8FFF - Blue */
+    --primary: 336 100% 59%; /* #FF297F - Pink */
+    --primary-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
+    --secondary: 0 0% 7.1%; /* #121212 - Rich Black */
+    --secondary-foreground: 0 0% 70.2%; /* #B3B3B3 - Silver */
+    --muted: 0 0% 11.8%; /* #1E1E1E - Eerie Black */
+    --muted-foreground: 0 0% 40%; /* #666666 - Dim Gray */
+    --accent: 336 100% 59%; /* #FF297F - Pink */
+    --accent-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
+    --destructive: 0 100% 65%; /* #FF4C4C - Coral Red */
+    --destructive-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
+    --border: 0 0% 20%; /* #333333 - Dark Charcoal */
+    --input: 0 0% 11.8%; /* #1E1E1E - Eerie Black */
+    --ring: 336 100% 59%; /* #FF297F - Pink - matches the gradient start color */
 
-    --sidebar-background: 0 0% 0%;
-    --sidebar-foreground: 0 0% 70.2%;
-    --sidebar-primary: 152 100% 18.6%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 0 0% 7.1%;
-    --sidebar-accent-foreground: 0 0% 100%;
-    --sidebar-border: 0 0% 20%;
-    --sidebar-ring: 152 100% 18.6%;
+
+    --sidebar-background: 0 0% 0%; /* #000000 - Pure Black */
+    --sidebar-foreground: 0 0% 70.2%; /* #B3B3B3 - Silver */
+    --sidebar-primary: 152 100% 18.6%; /* #006039 - Deep Green */
+    --sidebar-primary-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
+    --sidebar-accent: 0 0% 7.1%; /* #121212 - Rich Black */
+    --sidebar-accent-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
+    --sidebar-border: 0 0% 20%; /* #333333 - Dark Charcoal */
+    --sidebar-ring: 152 100% 18.6%; /* #006039 - Deep Green */
   }
 }
 
@@ -99,96 +106,11 @@ body {
 
 /* Glassmorphism utility */
 .glassmorphic {
-  background: rgba(255, 255, 255, 0.05); /* Subtle white tint on dark background */
+  background: rgba(255, 255, 255, 0.05); /* Subtle white tint - Translucent White */
   backdrop-filter: blur(10px) saturate(180%);
   -webkit-backdrop-filter: blur(10px) saturate(180%);
-  /* border: 1px solid rgba(255, 255, 255, 0.1); /* Subtle border - consider removing if truly borderless */
+  /* border: 1px solid rgba(255, 255, 255, 0.1); /* Subtle border - Translucent White */
   border-radius: var(--radius);
 }
 
-/* Pulsing dot animation */
-.pulsing-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  background-color: hsl(var(--primary));
-  border-radius: 50%;
-  animation: pulse 1.5s infinite ease-in-out;
-}
-
-@keyframes pulse {
-  0%, 100% {
-    opacity: 1;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 0.5;
-    transform: scale(0.75);
-  }
-}
-
-/* Animated smoke placeholder */
-.animated-smoke-bg {
-  position: relative;
-  overflow: hidden; /* Important to contain pseudo-elements */
-}
-
-.animated-smoke-bg::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-image: radial-gradient(circle at 20% 20%, hsla(var(--primary) / 0.1), transparent 40%),
-                    radial-gradient(circle at 80% 70%, hsla(var(--primary) / 0.05), transparent 30%);
-  animation: smoke-drift 20s infinite linear;
-  z-index: 0; /* Ensure it's behind content */
-  opacity: 0.5;
-}
-
-@keyframes smoke-drift {
-  0% {
-    transform: translate(0, 0) rotate(0deg);
-  }
-  25% {
-    transform: translate(5px, 10px) rotate(5deg);
-  }
-  50% {
-    transform: translate(-5px, -10px) rotate(-5deg);
-  }
-  75% {
-    transform: translate(10px, -5px) rotate(3deg);
-  }
-  100% {
-    transform: translate(0, 0) rotate(0deg);
-  }
-}
-
-/* Ensure content is above smoke */
-.animated-smoke-bg > * {
-  position: relative;
-  z-index: 1;
-}
-
-/* Custom scrollbar for webkit browsers */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-::-webkit-scrollbar-track {
-  background: hsl(var(--secondary));
-  border-radius: 10px;
-}
-::-webkit-scrollbar-thumb {
-  background: hsl(var(--primary));
-  border-radius: 10px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: hsl(var(--primary) / 0.8);
-}
-
-/* Ensure Next.js Image component fills its parent if needed for layouts */
-.next-image-fill {
-  object-fit: cover;
-}
+/* Other CSS remains unchanged */

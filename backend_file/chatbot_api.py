@@ -167,6 +167,105 @@ def setup_device():
         print("⚠️ No GPU detected, using CPU. Embeddings will be slower.")
         return torch.device("cpu"), False
 
+# Chat history management functions
+def load_chat_history(chat_id: str) -> Dict:
+    """Loads chat history from file based on chat ID."""
+    try:
+        chat_file = os.path.join(CONFIG["chat_history_directory"], f"{chat_id}.json")
+        if os.path.exists(chat_file):
+            with open(chat_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        else:
+            return None
+    except Exception as e:
+        logger.error(f"Error loading chat history for {chat_id}: {str(e)}")
+        return None
+
+def save_chat_history(chat_id: str, chat_name: str, message: Dict, selected_files: List[str]) -> Dict:
+    """Saves a message to chat history and returns the updated history."""
+    try:
+        history = load_chat_history(chat_id)
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        if not history:
+            # Create new history
+            history = {
+                "chat_id": chat_id,
+                "chat_name": chat_name,
+                "messages": [message],
+                "selected_files": selected_files,
+                "created_at": now,
+                "updated_at": now,
+                "ai_named": False
+            }
+        else:
+            # Update existing history
+            history["messages"].append(message)
+            history["updated_at"] = now
+            history["selected_files"] = selected_files
+            
+        # Save to file
+        os.makedirs(CONFIG["chat_history_directory"], exist_ok=True)
+        chat_file = os.path.join(CONFIG["chat_history_directory"], f"{chat_id}.json")
+        with open(chat_file, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
+            
+        logger.info(f"Chat history saved for {chat_id}, {len(history['messages'])} messages total")
+        return history
+    except Exception as e:
+        logger.error(f"Error saving chat history for {chat_id}: {str(e)}")
+        logger.error(traceback.format_exc())
+        return None
+
+async def generate_chat_name(chat_id: str, messages: List[Dict], config: Dict) -> str:
+    """Generates a name for the chat using AI based on conversation content."""
+    try:
+        if not ollama_client or len(messages) < 2:
+            return None
+            
+        # Extract conversation for context
+        conversation_text = "\n".join([f"{m['role']}: {m['content'][:100]}..." for m in messages[:4]])
+        
+        # Create the prompt
+        prompt = f"""Based on the following conversation, generate a short, descriptive title (max 30 chars):
+
+{conversation_text}
+
+Title: """
+
+        # Call Ollama API
+        response = await asyncio.to_thread(
+            lambda: ollama.chat.completions.create(
+                model=config["ollama_model"],
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=10
+            )
+        )
+        
+        # Process and save the title
+        title = response.choices[0].message.content.strip()
+        # Remove quotes if present
+        title = re.sub(r'^["\']+|["\']+$', '', title)
+        # Limit length
+        if len(title) > 30:
+            title = title[:27] + "..."
+            
+        # Update chat history with new title
+        history = load_chat_history(chat_id)
+        if history:
+            history["chat_name"] = title
+            history["ai_named"] = True
+            chat_file = os.path.join(CONFIG["chat_history_directory"], f"{chat_id}.json")
+            with open(chat_file, "w", encoding="utf-8") as f:
+                json.dump(history, f, indent=2)
+            
+        logger.info(f"Generated chat name for {chat_id}: '{title}'")
+        return title
+    except Exception as e:
+        logger.error(f"Error generating chat name: {str(e)}")
+        return None
+
 # Call this function at startup
 device, has_gpu = setup_device()
 
@@ -2020,20 +2119,24 @@ async def http_chat(request: ChatRequest):
     Handles a chat message via REST API.
     Allows customization of RAG, LLM parameters, and response formatting.
     """
+    # Initialize client_id at the beginning to avoid UnboundLocalError
+    client_id = request.client_id or f"chat_{hashlib.md5(str(time.time()).encode()).hexdigest()[:10]}"
+    
     try:
         logger.info(f"--- HTTP Chat Request ---")
         logger.info(f"Request Data: {request.model_dump()}")  # Updated from dict() to model_dump()
 
         # 1. Validate and parse input
-        query = request.message.strip()
+        query = request.message.strip() if request.message else ""
         if not query:
-            raise HTTPException(status_code=400, detail="Query message cannot be empty.")
+            # Return a proper response instead of raising exception for empty queries
+            logger.warning(f"Empty query received from client {client_id}")
+            return ChatResponse(
+                message="I need a question or input to respond to. Please provide a message.",
+                context=[],
+                client_id=client_id
+            )
         
-        # Generate or use client ID
-        client_id = request.client_id
-        if not client_id:
-            client_id = f"chat_{hashlib.md5(str(time.time()).encode()).hexdigest()[:10]}"
-
         # 2. Check file access and read content
         files_with_content = read_vault_content(request.selected_files)
         if not files_with_content:
@@ -2137,44 +2240,49 @@ async def http_chat(request: ChatRequest):
         )
 
     except Exception as e:
-        logger.error(f"Error generating chat name for {client_id}: {str(e)}")
+        logger.error(f"Error in chat handling for client {client_id}: {str(e)}")
         logger.error(traceback.format_exc())
-        return False
+        
+        # Return a proper error response instead of raising exception
+        return ChatResponse(
+            message="Sorry, I encountered an error processing your request. Please try again.",
+            context=[],
+            client_id=client_id
+        )
 
-# --- Chat History Functions ---
-def load_chat_history(chat_id: str) -> dict:
-    """Loads chat history from file based on chat ID."""
-    try:
-        chat_file = os.path.join(CONFIG["chat_history_directory"], f"{chat_id}.json")
-        if not os.path.exists(chat_file):
-            return None
-                
-        with open(chat_file, "r", encoding="utf-8") as f:
-            history = json.load(f)
-        return history
-    except Exception as e:
-        logger.error(f"Error loading chat history {chat_id}: {str(e)}")
-        return None
+# Add file selection endpoint
+@app.post("/file-selection", summary="Store file selection for a chat session")
+async def file_selection(
+    session_id: str = Body(..., embed=True),
+    selected_files: List[str] = Body(..., embed=True),
+    timestamp: Optional[float] = Body(None, embed=True)
+):
+    """
+    Records which files were selected for a particular chat session.
+    This helps the backend optimize context retrieval.
+    """
+    logger.info(f"Received file selection update for session {session_id}: {len(selected_files)} files")
     
-def save_chat_history(chat_id: str, chat_name: str, message: dict, selected_files: List[str]) -> dict:
-    """Saves a message to the chat history."""
     try:
-        # Create history directory if it doesn't exist
-        os.makedirs(CONFIG["chat_history_directory"], exist_ok=True)
+        # Update chat history with the selected files
+        history = load_chat_history(session_id)
+        if history:
+            history["selected_files"] = selected_files
+            history["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             
-        # Determine history file path
-        chat_file = os.path.join(CONFIG["chat_history_directory"], f"{chat_id}.json")
-            
-        # Load existing history or create new
-        if os.path.exists(chat_file):
-            with open(chat_file, "r", encoding="utf-8") as f:
-                history = json.load(f)
+            # Save the updated history
+            chat_file = os.path.join(CONFIG["chat_history_directory"], f"{session_id}.json")
+            with open(chat_file, "w", encoding="utf-8") as f:
+                json.dump(history, f, indent=2)
+                
+            logger.info(f"Updated chat history for {session_id} with {len(selected_files)} files")
+            return {"success": True, "session_id": session_id, "file_count": len(selected_files)}
         else:
-            # Create new history with timestamp
+            # Create a new chat history if one doesn't exist
             now = time.strftime("%Y-%m-%d %H:%M:%S")
-            history = {
-                "chat_id": chat_id,
-                "chat_name": chat_name,
+            new_history = {
+                "chat_id": session_id,
+                "chat_name": f"Chat {now}",
                 "messages": [],
                 "selected_files": selected_files,
                 "created_at": now,
@@ -2182,91 +2290,17 @@ def save_chat_history(chat_id: str, chat_name: str, message: dict, selected_file
                 "ai_named": False
             }
             
-        # Add the new message
-        if message:
-            history["messages"].append(message)
-            
-        # Update files and timestamp
-        history["selected_files"] = selected_files
-        history["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            
-        # Save the updated history
-        with open(chat_file, "w", encoding="utf-8") as f:
-            json.dump(history, f, indent=2)
-                
-        return history
-    except Exception as e:
-        logger.error(f"Error saving chat history for {chat_id}: {str(e)}")
-        logger.error(traceback.format_exc())
-        return None
-
-async def generate_chat_name(chat_id: str, messages: List[dict], client: OpenAI) -> bool:
-    """Generate an AI-based name for the chat based on conversation history."""
-    try:
-        if not client or not messages or len(messages) < 2:
-            logger.warning("Cannot generate chat name: insufficient data")
-            return False
-                
-        # Extract the conversation for context
-        conversation_text = ""
-        for i, msg in enumerate(messages[:4]):  # Use up to first 4 messages
-            role = msg.get("role", "")
-            content = msg.get("content", "")
-            if content and role:
-                conversation_text += f"{role.upper()}: {content[:100]}...\n"
-            
-        # Prepare prompt for AI
-        prompt = f"""Based on this conversation, generate a short, descriptive title (max 5 words):
-    
-        {conversation_text}
-            
-        TITLE: """
-    
-        # Call API to generate title
-        try:
-            response = await asyncio.to_thread(
-                lambda: client.chat.completions.create(  # Use chat instead of Chat
-                    model=CONFIG["ollama_model"],
-                    messages=[{"role": "system", "content": prompt}],
-                    temperature=0.7,
-                    max_tokens=10
-                )
-            )
-            
-            # Extract title from response
-            generated_title = response.choices[0].message.content.strip()
-        except Exception as api_error:
-            logger.error(f"Error generating title via API: {str(api_error)}")
-            # Provide a fallback title instead of failing
-            generated_title = f"Chat {chat_id[-6:]}; {time.strftime('%Y-%m-%d')}"
-        logger.info(f"Generated title: {generated_title}")
-            
-        # Clean up title (remove quotes and other formatting)
-        clean_title = re.sub(r'^["\'`]|["\'`]$', '', generated_title)
-        clean_title = clean_title.replace("TITLE:", "").strip()
-            
-        if len(clean_title) > 30:
-            clean_title = clean_title[:30] + "..."
-                
-        # Update the chat history with the new title
-        history = load_chat_history(chat_id)
-        if history:
-            history["chat_name"] = clean_title
-            history["ai_named"] = True
-                
-            # --- HTTP API Endpoints ---
-            history["ai_named"] = True
-            
-            # Save the updated history
-            chat_file = os.path.join(CONFIG["chat_history_directory"], f"{chat_id}.json")
+            # Save the new history
+            os.makedirs(CONFIG["chat_history_directory"], exist_ok=True)
+            chat_file = os.path.join(CONFIG["chat_history_directory"], f"{session_id}.json")
             with open(chat_file, "w", encoding="utf-8") as f:
-                json.dump(history, f, indent=2)
+                json.dump(new_history, f, indent=2)
                 
-            logger.info(f"Updated chat {chat_id} with AI-generated name: {clean_title}")
-            return True
-        return False
+            logger.info(f"Created new chat history for {session_id} with {len(selected_files)} files")
+            return {"success": True, "session_id": session_id, "file_count": len(selected_files), "created": True}
+            
     except Exception as e:
-        logger.error(f"Error generating chat name for {chat_id}: {str(e)}")
+        logger.error(f"Error updating file selection for {session_id}: {str(e)}")
         logger.error(traceback.format_exc())
         # Return False instead of raising an exception to prevent 500 errors
         return False
@@ -2370,139 +2404,12 @@ async def get_files(tag: str = None):
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Error retrieving files: {str(e)}")
 
-# Add a function to check for and generate missing questions for all files
-async def ensure_files_have_questions():
-    """
-    Checks all files in the vault and generates suggested questions for those without them.
-    This function helps ensure all documents have question suggestions for users.
-    """
-    if not ollama_client:
-        logger.warning("Cannot generate questions - Ollama client not available")
-        return {"success": False, "message": "Ollama client not available"}
-    
-    try:
-        # Get all files from the vault
-        files = get_vault_files()
-        if not files:
-            logger.info("No files found in vault to check for questions")
-            return {"success": True, "message": "No files found", "processed": 0}
-        
-        files_to_process = []
-        # Identify files without questions or with empty question lists
-        for file in files:
-            filename = file.get("filename")
-            if not filename:
-                continue
-                
-            has_questions = (
-                "suggested_questions" in file and 
-                isinstance(file["suggested_questions"], list) and 
-                len(file["suggested_questions"]) > 0
-            )
-            
-            if not has_questions:
-                files_to_process.append(filename)
-        
-        if not files_to_process:
-            logger.info("All files already have suggested questions")
-            return {"success": True, "message": "All files have questions", "processed": 0}
-            
-        logger.info(f"Found {len(files_to_process)} files without suggested questions")
-        
-        # Process each file that needs questions
-        processed_count = 0
-        for filename in files_to_process:
-            try:
-                # Read the file content
-                content_by_file = read_vault_content([filename])
-                if not content_by_file or filename not in content_by_file:
-                    logger.warning(f"Could not read content for {filename}, skipping question generation")
-                    continue
-                
-                # Join chunks to get representative content for question generation
-                content = "\n\n".join(content_by_file[filename][:20])  # Use first 20 chunks for context
-                if not content.strip():
-                    logger.warning(f"File {filename} appears empty, skipping question generation")
-                    continue
-                
-                # Generate questions for the file
-                logger.info(f"Generating suggested questions for {filename}")
-                questions = await generate_document_questions(content, filename, ollama_client)
-                
-                if questions:
-                    # Update the file metadata with the generated questions
-                    updated = update_file_metadata(filename, suggested_questions=questions)
-                    if updated:
-                        logger.info(f"Generated {len(questions)} questions for {filename}")
-                        processed_count += 1
-                    else:
-                        logger.warning(f"Failed to update metadata with generated questions for {filename}")
-                else:
-                    logger.warning(f"No questions generated for {filename}")
-                
-                # Add a small delay between files to avoid overwhelming the LLM
-                await asyncio.sleep(0.5)
-                
-            except Exception as e:
-                logger.error(f"Error processing file {filename}: {str(e)}")
-                logger.error(traceback.format_exc())
-                # Continue with next file
-        
-        return {
-            "success": True,
-            "message": f"Generated questions for {processed_count} files",
-            "processed": processed_count,
-            "total_checked": len(files_to_process)
-        }
-                
-    except Exception as e:
-        logger.error(f"Error in ensure_files_have_questions: {str(e)}")
-        logger.error(traceback.format_exc())
-        return {"success": False, "message": f"Error: {str(e)}"}
-
-# Add an endpoint to trigger question generation for all files
-@app.post("/generate-questions", summary="Generate Suggested Questions")
-async def generate_questions_endpoint(regenerate_all: bool = False):
-    """
-    Checks all files and generates suggested questions for those without any.
-    
-    Parameters:
-    - regenerate_all: If true, regenerates questions for all files, even those that already have questions
-    """
-    try:
-        if regenerate_all:
-            # If regenerating all, first clear existing questions
-            files = get_vault_files()
-            for file in files:
-                filename = file.get("filename")
-                if filename:
-                    update_file_metadata(filename, suggested_questions=[])
-            
-            logger.info("Cleared existing questions for all files")
-            
-        # Generate questions
-        result = await ensure_files_have_questions()
-        return result
-    except Exception as e:
-        logger.error(f"Error in generate_questions endpoint: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Error generating questions: {str(e)}")
-
 # Run initialization
 initialize_application()
-
-# Add background task to ensure files have questions after startup
-@app.on_event("startup")
-async def startup_event():
-    try:
-        # Start question generation in a background task
-        asyncio.create_task(ensure_files_have_questions())
-        logger.info("Started background task to check and generate questions for files")
-    except Exception as e:
-        logger.error(f"Error starting question generation task: {str(e)}")
 
 # Start server using uvicorn
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     logger.info(f"Starting API server on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
+    logger.info("API server started successfully.")

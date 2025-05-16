@@ -72,18 +72,31 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
   // API service hook
   const api = useApiService();
 
-  // Check backend connection on component mount
+  // Check backend connection on component mount - with throttling
   useEffect(() => {
+    // Avoid multiple connection checks running in parallel
+    let isMounted = true;
+    let connectionCheckTimeout: NodeJS.Timeout | null = null;
+    
     const checkConnection = async () => {
+      if (!isMounted) return;
+      
       setConnectionStatus('connecting');
       try {
         const status = await api.checkStatus();
+        
+        if (!isMounted) return;
         setConnectionStatus('connected');
         setBackendVersion(status.version);
         
         // Optional: Load any server config
         const config = await api.getConfig();
+        
+        // Schedule next check after a reasonable interval
+        connectionCheckTimeout = setTimeout(checkConnection, 30000); // 30 seconds
       } catch (error) {
+        if (!isMounted) return;
+        
         console.error("Backend connection failed:", error);
         setConnectionStatus('disconnected');
         toast({
@@ -92,10 +105,22 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
           variant: "destructive",
           duration: 5000,
         });
+        
+        // Retry after a longer interval when disconnected
+        connectionCheckTimeout = setTimeout(checkConnection, 60000); // 1 minute
       }
     };
     
+    // Initial check
     checkConnection();
+    
+    // Cleanup function
+    return () => {
+      isMounted = false;
+      if (connectionCheckTimeout) {
+        clearTimeout(connectionCheckTimeout);
+      }
+    };
   }, []);
 
   // Keep only messages that fit in the container
@@ -163,21 +188,66 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
     }
   }, [currentSession]);
 
-  // Load available files from backend
+  // Load available files from backend - with throttling and proper cleanup
   useEffect(() => {
+    let isMounted = true;
+    let loadFilesTimeout: NodeJS.Timeout | null = null;
+    let loadAttempts = 0;
+    const maxAttempts = 3;
+    
     const loadAvailableFiles = async () => {
-      if (connectionStatus !== 'connected') return;
+      if (!isMounted || connectionStatus !== 'connected') return;
       
       try {
+        // Only try loading files a maximum number of times
+        if (loadAttempts >= maxAttempts) {
+          console.log(`Reached max attempts (${maxAttempts}) for loading files, stopping automatic retries`);
+          return;
+        }
+        
+        loadAttempts++;
+        
         // Get files from the backend
         const files = await api.getFiles();
-        console.log("Available files:", files);
+        if (!isMounted) return;
+        
+        if (files && files.files && Array.isArray(files.files)) {
+          console.log(`Loaded ${files.files.length} files from backend`);
+        } else if (Array.isArray(files)) {
+          console.log(`Loaded ${files.length} files from backend`);
+        } else {
+          console.warn("Unexpected files format:", files);
+        }
+        
+        // Schedule next refresh after reasonable interval - only if this was successful
+        if (isMounted) {
+          loadFilesTimeout = setTimeout(loadAvailableFiles, 300000); // 5 minutes
+        }
       } catch (error) {
+        if (!isMounted) return;
         console.error("Error loading files from backend:", error);
+        
+        // Retry with increasing backoff
+        const backoff = Math.min(15000, 2000 * Math.pow(2, loadAttempts)); // Max 15 seconds
+        console.log(`Will retry loading files in ${backoff/1000}s`);
+        
+        loadFilesTimeout = setTimeout(loadAvailableFiles, backoff);
       }
     };
     
-    loadAvailableFiles();
+    // Only load files when connected, with a small delay
+    if (connectionStatus === 'connected') {
+      // Small delay to ensure other components are initialized
+      loadFilesTimeout = setTimeout(loadAvailableFiles, 1000);
+    }
+    
+    // Cleanup function
+    return () => {
+      isMounted = false;
+      if (loadFilesTimeout) {
+        clearTimeout(loadFilesTimeout);
+      }
+    };
   }, [connectionStatus]);
 
   // Start a new chat session
@@ -220,8 +290,9 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
     }
   };
 
-  // Handle file selection change
-  const handleFileSelectionChange = (files: string[]) => {
+  // Handle file selection change with better error tolerance
+  const handleFileSelectionChange = async (files: string[]) => {
+    // Update local state immediately for responsiveness
     setSelectedFilesList(files);
     
     // Update current session with selected files
@@ -232,74 +303,173 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
         lastModified: Date.now()
       };
       
+      // Update local state and save locally right away
       setCurrentSession(updatedSession);
+      saveChatSession(updatedSession);
       
-      // Save to backend if connected
+      // Only show feedback if files changed
+      const filesChanged = JSON.stringify(currentSession.selectedFiles || []) !== JSON.stringify(files);
+      
+      if (filesChanged && files.length > 0) {
+        toast({
+          title: "Files Selected",
+          description: `${files.length} file${files.length !== 1 ? 's' : ''} selected for context`,
+          variant: "default",
+        });
+      }
+      
+      // Update backend in background (non-blocking) if connected
       if (connectionStatus === 'connected') {
-        api.updateChatSession(updatedSession)
-          .catch(error => {
-            console.error("Error updating session with selected files:", error);
-            saveChatSession(updatedSession);
-          });
-      } else {
-        saveChatSession(updatedSession);
+        // Don't await this call - let it run asynchronously
+        api.updateFileSelection({
+          sessionId: currentSession.id,
+          files: files
+        }).catch(error => {
+          console.warn("Background file selection update failed:", error);
+          // No UI notification since this is a background operation
+        });
       }
     }
   };
   
   // Open file selector dialog
   const openFileSelector = () => {
+    // Pre-check connection before opening dialog
+    if (connectionStatus !== 'connected') {
+      toast({
+        title: "Backend Disconnected",
+        description: "File selection requires connection to the backend.",
+        variant: "destructive",
+      });
+      return;
+    }
     setIsFileDialogOpen(true);
   };
   
-  // Send message to chat
+  // Send message to chat with improved empty message handling
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
-    if (!input.trim() && !uploadedFile && selectedFilesList.length === 0) return;
+    const trimmedInput = input.trim();
+    
+    // Check if we should allow sending
+    if (!trimmedInput && !uploadedFile && selectedFilesList.length === 0) return;
 
+    // Create user message
     const userMessage: ChatMessage = {
       id: uuidv4(),
       sender: "user",
-      content: input,
+      content: trimmedInput || " ", // Use space for empty messages
       timestamp: Date.now(),
     };
     
+    // Update UI immediately
     const updatedMessages = [...messages, userMessage];
     setMessages(updatedMessages);
     setInput("");
     setIsLoading(true);
 
-    try {
-      let botResponseContent = "I'm having trouble understanding that.";
-      let citations: string[] | undefined;
+    let botMessage: ChatMessage;
 
-      if (connectionStatus === 'connected') {
-        // Use backend API for chat with selected files
-        const response = await api.sendChatMessage({
-          sessionId: currentSession?.id,
-          message: input,
-          selected_files: selectedFilesList // Use the selected files list for the API
-        });
-        
-        botResponseContent = response.answer;
-        citations = response.citations;
-      } else {
-        // Offline fallback
-        if (documentContent) {
-          botResponseContent = "I can see you've uploaded a document, but I'm currently working offline. Please connect to the backend for complete functionality.";
-        } else {
-          botResponseContent = "I'm currently in offline mode with limited capabilities. Please check your connection to the backend service.";
+    try {
+      // Start timeout for detecting slow responses
+      const timeoutId = setTimeout(() => {
+        if (isLoading) {
+          toast({
+            title: "Taking longer than expected",
+            description: "The AI is processing your request. This might take a moment.",
+            variant: "default",
+          });
         }
+      }, 10000); // 10 seconds timeout warning
+      
+      if (connectionStatus === 'connected') {
+        try {
+          // Always send at least a space character to avoid empty message errors
+          const messageToSend = trimmedInput || " ";
+          
+          // Use backend API for chat with selected files
+          const response = await api.sendChatMessage({
+            sessionId: currentSession?.id,
+            message: messageToSend,
+            selected_files: selectedFilesList
+          });
+          
+          clearTimeout(timeoutId);
+          
+          // Create bot message from successful response
+          botMessage = {
+            id: uuidv4(),
+            sender: "bot",
+            content: response.message || response.answer || "I processed your request but couldn't generate a proper response.",
+            timestamp: Date.now(),
+            citations: response.citations || response.context || [],
+          };
+        } catch (apiError: any) {
+          clearTimeout(timeoutId);
+          console.error("Backend API error:", apiError);
+          
+          // More specific handling of Ollama errors
+          let errorMessage = "Sorry, I encountered an error processing your request.";
+          let errorDetail = "";
+          let isOllamaError = false;
+          
+          // Check for specific error types with improved detection
+          if (apiError.message?.includes('Ollama') || 
+              apiError.message?.includes('ollama') ||
+              apiError.message?.includes('completions') ||
+              apiError.message?.includes('LLM')) {
+            
+            isOllamaError = true;
+            errorMessage = "The AI model is currently experiencing technical issues.";
+            errorDetail = "The server administrator has been notified. This might be due to an issue with the Ollama API or model configuration.";
+            
+            // Show admin-targeted toast for easier debugging
+            toast({
+              title: "Ollama API Error",
+              description: `Error: ${apiError.message}. Check backend logs for details.`,
+              variant: "destructive",
+              duration: 10000,
+            });
+          } else if (apiError.message?.includes('Network error')) {
+            errorMessage = "Connection to the backend server was lost.";
+            errorDetail = "Please check your network connection and try again later.";
+            
+            // Potentially set connection status to disconnected
+            setConnectionStatus('disconnected');
+          }
+          
+          // Create error message with more details and styling
+          botMessage = {
+            id: uuidv4(),
+            sender: "bot",
+            content: `<div class="error-message">
+                        <p><strong>${errorMessage}</strong></p>
+                        ${errorDetail ? `<p class="error-detail">${errorDetail}</p>` : ''}
+                        ${isOllamaError ? `
+                        <p class="error-help">Try these options:</p>
+                        <ul>
+                          <li>Wait a few minutes and try again</li>
+                          <li>Try a simpler query without complex instructions</li>
+                          <li>Contact the administrator about the Ollama API error</li>
+                        </ul>` : ''}
+                      </div>`,
+            timestamp: Date.now(),
+            error: true,
+          };
+        }
+      } else {
+        // Offline mode response
+        clearTimeout(timeoutId);
+        botMessage = {
+          id: uuidv4(),
+          sender: "bot",
+          content: "I'm currently in offline mode. Please check your connection to the backend service to enable AI chat functionality.",
+          timestamp: Date.now(),
+          error: true,
+        };
       }
       
-      const botMessage: ChatMessage = {
-        id: uuidv4(),
-        sender: "bot",
-        content: botResponseContent,
-        timestamp: Date.now(),
-        citations,
-      };
-      
+      // Add bot message to chat
       const finalMessages = [...updatedMessages, botMessage];
       setMessages(finalMessages);
 
@@ -307,7 +477,8 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
         const updatedSession = { 
           ...currentSession, 
           messages: finalMessages, 
-          lastModified: Date.now() 
+          lastModified: Date.now(),
+          selectedFiles: selectedFilesList // Make sure selected files are saved
         };
         setCurrentSession(updatedSession);
         
@@ -315,17 +486,18 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
         saveChatSession(updatedSession);
       }
     } catch (error) {
-      console.error("Error with chat API:", error);
+      console.error("Critical error in chat handling:", error);
       const errorMessage: ChatMessage = {
         id: uuidv4(),
         sender: "bot",
-        content: "Sorry, an error occurred while processing your request. Please try again or check your connection.",
+        content: "A critical error occurred. Please reload the application and try again.",
         timestamp: Date.now(),
+        error: true,
       };
       setMessages(prev => [...prev, errorMessage]);
       toast({
-        title: "AI Error",
-        description: "Could not get a response from the AI backend.",
+        title: "Critical Error",
+        description: "An unexpected error occurred. Please reload the application.",
         variant: "destructive",
       });
     } finally {
@@ -447,7 +619,7 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
   }, [currentSession, uploadedFile, connectionStatus, api]);
 
   return (
-    <div className="flex flex-col h-[100vh] w-full overflow-hidden pt-3 pb-4 ">
+    <div className="flex flex-col h-[100vh] w-full overflow-hidden pt-3 pb-4">
       <Card className="flex flex-col h-full border-0 shadow-2xl glassmorphic animated-smoke-bg">
         <CardHeader className="p-2 border-b border-border/50 shrink-0">
           <div className="flex justify-between items-center">
@@ -575,6 +747,8 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
                     className={`max-w-[80%] p-2 rounded-lg shadow-sm text-xs ${
                       msg.sender === "user"
                         ? "bg-primary text-primary-foreground rounded-br-none"
+                        : msg.error
+                        ? "bg-destructive/20 text-destructive-foreground rounded-bl-none border border-destructive/30"
                         : "bg-secondary text-secondary-foreground rounded-bl-none glassmorphic"
                     }`}
                   >
@@ -657,7 +831,7 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
               size="icon" 
               disabled={isLoading || isSummarizing || !input.trim()} 
               aria-label="Send message"
-              className={`h-7 w-7 transition-all ${(isLoading || !input.trim()) ? "opacity-50" : "opacity-100 hover:scale-105"}`}
+              className={`h-7 w-7 transition-all bg-gradient-to-l from-[#FF297F] to-[#4B8FFF] ${(isLoading || !input.trim()) ? "opacity-50" : "opacity-100 hover:scale-105"}`}
             >
               {isLoading ? <LoadingSpinner size="sm" /> : <Send className="h-3 w-3" />}
             </Button>
@@ -680,5 +854,14 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
       </Dialog>
     </div>
   );
+}
+
+interface ChatMessage {
+  id: string;
+  sender: string;
+  content: string;
+  timestamp: number;
+  citations?: string[];
+  error?: boolean;
 }
 
