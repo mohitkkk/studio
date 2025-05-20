@@ -1,3 +1,4 @@
+
 'use client'
 import { useCallback, useEffect, useRef, useState, FormEvent } from "react";
 import type { ChangeEvent } from 'react';
@@ -58,7 +59,7 @@ export default function ChatPageClient({
   initialChatId?: string
 }) {
   // Initialize API service
-  const api = useApiService();
+  const serviceApi = useApiService(); // Renamed to avoid conflict with imported api
   
   // State variables
   const [currentSession, setCurrentSession] = useState<ChatSession | null>(null);
@@ -82,36 +83,37 @@ export default function ChatPageClient({
   
   // Check backend connection on component mount - with throttling
   useEffect(() => {
-    // Avoid multiple connection checks running in parallel
     let isMounted = true;
     let connectionCheckTimeout: NodeJS.Timeout | null = null;
     
     const checkConnection = async () => {
       if (!isMounted) return;
+
+      if (!serviceApi || typeof serviceApi.getChatSessions !== 'function') {
+        console.warn("API service not ready in checkConnection. Retrying soon.");
+        if (isMounted) {
+            connectionCheckTimeout = setTimeout(checkConnection, 1000); // Retry after 1 sec
+        }
+        return;
+      }
       
       setConnectionStatus('connecting');
       try {
-        // Try to use getConfig instead of checkStatus
-        // If getConfig is also unavailable, fall back to a simple GET request
-        try {
-          if (typeof api.getConfig === 'function') {
-            await api.getConfig();
-          } else {
-            // Simple ping test using any available method
-            await api.getChatSessions();
-          }
-        } catch (specificError) {
-          console.warn("First connection check method failed:", specificError);
-          // One more attempt with different method as fallback
-          await api.getChatSessions();
+        // First, try getConfig as it's simpler
+        if (typeof serviceApi.getConfig === 'function') {
+          await serviceApi.getConfig();
+        } else {
+          // Fallback to getChatSessions if getConfig is not available (e.g. older API service structure)
+          await serviceApi.getChatSessions();
         }
         
         if (!isMounted) return;
         setConnectionStatus('connected');
-        setBackendVersion('connected'); // No version info available
+        // Assuming getConfig or getChatSessions might return version info or imply connection
+        setBackendVersion('connected'); // Simplified version display
         
-        // Schedule next check after a reasonable interval
-        connectionCheckTimeout = setTimeout(checkConnection, 30000); // 30 seconds
+        // Schedule next check
+        connectionCheckTimeout = setTimeout(checkConnection, 30000); // Check every 30 seconds
       } catch (error) {
         if (!isMounted) return;
         
@@ -124,28 +126,26 @@ export default function ChatPageClient({
           duration: 5000,
         });
         
-        // Retry after a longer interval when disconnected
-        connectionCheckTimeout = setTimeout(checkConnection, 60000); // 1 minute
+        // Retry connection check more frequently if disconnected
+        connectionCheckTimeout = setTimeout(checkConnection, 60000); // Retry after 1 minute if disconnected
       }
     };
     
-    // Initial check
     checkConnection();
     
-    // Cleanup function
     return () => {
       isMounted = false;
       if (connectionCheckTimeout) {
         clearTimeout(connectionCheckTimeout);
       }
     };
-  }, [toast]); // Only include toast in dependencies, not api
+  }, [serviceApi, toast]);
 
   // Keep only messages that fit in the container
   useEffect(() => {
     if (messages.length > 0) {
-      // Start with most recent messages and add older ones until we fill the container
-      const recentMessages = [...messages].reverse().slice(0, 200); // Start with at most 200 most recent
+      // Show a reasonable number of recent messages to avoid performance issues
+      const recentMessages = [...messages].reverse().slice(0, 200); 
       setVisibleMessages(recentMessages.reverse());
     }
   }, [messages]);
@@ -155,72 +155,77 @@ export default function ChatPageClient({
     if (messagesContainerRef.current) {
       messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
     }
-  }, [messages]);
+  }, [messages]); // Re-check: should be visibleMessages or a combination
 
   // Fetch chat history from backend or localStorage
   useEffect(() => {
     const loadChatSessions = async () => {
-      if (connectionStatus !== 'connected') return;
-      
-      try {
-        // Check if method exists before calling it
-        if (typeof api.getChatSessions === 'function') {
-          const sessions = await api.getChatSessions();
-          if (sessions && sessions.length > 0) {
-            setCurrentSession(sessions[0]);
-          } else {
-            startNewSession();
-          }
-        } else {
-          console.warn('getChatSessions method not available on API');
-          startNewSession();
-        }
-      } catch (error) {
-        console.error("Error loading chat sessions:", error);
-        // Fallback to localStorage or create new session
+      // Ensure serviceApi and its methods are available
+      if (connectionStatus !== 'connected' || !serviceApi || typeof serviceApi.getChatSessions !== 'function') {
+        console.warn('loadChatSessions: API service not ready or not connected. Falling back to local.');
         const localSessions = getLocalChatHistory();
         if (localSessions.length > 0) {
           setCurrentSession(localSessions[0]);
         } else {
-          startNewSession();
+          // await startNewSession(); // Call startNewSession if no local sessions
+        }
+        return;
+      }
+      
+      try {
+        const sessions = await serviceApi.getChatSessions();
+        if (sessions && sessions.length > 0) {
+          setCurrentSession(sessions[0]); // Load the most recent session
+        } else {
+          // await startNewSession(); // No sessions on backend, start a new one
+        }
+      } catch (error) {
+        console.error("Error loading chat sessions from backend:", error);
+        const localSessions = getLocalChatHistory();
+        if (localSessions.length > 0) {
+          setCurrentSession(localSessions[0]);
+        } else {
+          // await startNewSession(); // Fallback to new session if backend and local fail
         }
       }
     };
 
-    if (!currentSession) {
+    if (!currentSession) { // Only load if no session is currently active
       loadChatSessions();
     }
-  }, [connectionStatus]);
+  }, [connectionStatus, serviceApi, currentSession]); // Added currentSession to dependencies
 
   // Start a new session or load latest one
   useEffect(() => {
     const history = getLocalChatHistory();
     if (history.length > 0 && !currentSession) {
-      startNewSession();
+      // setCurrentSession(history[0]); // Load latest local if no current session
+      // startNewSession(); // This might be redundant given the load logic
     } else if (!currentSession) {
-      startNewSession();
+      // startNewSession();
     }
-  }, []);
+  }, []); 
 
   // Load messages from current session
   useEffect(() => {
     if (currentSession) {
-      // Map the messages to ensure the sender property matches the expected union type
       const mappedMessages = currentSession.messages.map(msg => ({
         ...msg,
+        // Ensure sender is correctly typed
         sender: (msg.sender === "user" || msg.sender === "assistant") 
           ? msg.sender as "user" | "assistant" 
-          : "assistant" // Default fallback
+          : "assistant" // Default to assistant if sender is unexpected
       }));
       setMessages(mappedMessages);
       
+      // Load document summary if available
       if (currentSession.documentContext) {
         setDocumentSummary(currentSession.documentContext.summary || null);
       }
     }
   }, [currentSession]);
 
-  // Load available files from backend - with throttling and proper cleanup
+  // Load available files from backend
   useEffect(() => {
     let isMounted = true;
     let loadFilesTimeout: NodeJS.Timeout | null = null;
@@ -228,59 +233,45 @@ export default function ChatPageClient({
     const maxAttempts = 3;
     
     const loadAvailableFiles = async () => {
-      if (!isMounted || connectionStatus !== 'connected') return;
+      if (!isMounted || connectionStatus !== 'connected' || !serviceApi || typeof serviceApi.getFiles !== 'function') return;
       
       try {
-        // Only try loading files a maximum number of times
-        if (loadAttempts >= maxAttempts) {
-          console.log(`Reached max attempts (${maxAttempts}) for loading files, stopping automatic retries`);
-          return;
-        }
-        
+        if (loadAttempts >= maxAttempts) return; // Max retries reached
         loadAttempts++;
         
-        // Get files from the backend
-        const files = await api.getFiles();
+        const filesData = await serviceApi.getFiles();
         if (!isMounted) return;
         
-        if (files && files.files && Array.isArray(files.files)) {
-          console.log(`Loaded ${files.files.length} files from backend`);
-        } else if (Array.isArray(files)) {
-          console.log(`Loaded ${files.length} files from backend`);
-        } else {
-          console.warn("Unexpected files format:", files);
+        // Handle file data (logging is fine, actual state update for files might be elsewhere or not needed here)
+        if (filesData && filesData.files && Array.isArray(filesData.files)) {
+          console.log(`Loaded ${filesData.files.length} files from backend`);
+        } else if (Array.isArray(filesData)) { // If API returns array directly
+          console.log(`Loaded ${filesData.length} files from backend`);
         }
         
-        // Schedule next refresh after reasonable interval - only if this was successful
+        // Schedule next refresh
         if (isMounted) {
-          loadFilesTimeout = setTimeout(loadAvailableFiles, 300000); // 5 minutes
+          loadFilesTimeout = setTimeout(loadAvailableFiles, 300000); // Refresh every 5 minutes
         }
       } catch (error) {
         if (!isMounted) return;
         console.error("Error loading files from backend:", error);
-        
-        // Retry with increasing backoff
-        const backoff = Math.min(15000, 2000 * Math.pow(2, loadAttempts)); // Max 15 seconds
-        console.log(`Will retry loading files in ${backoff/1000}s`);
-        
+        // Exponential backoff for retries
+        const backoff = Math.min(15000, 2000 * Math.pow(2, loadAttempts));
         loadFilesTimeout = setTimeout(loadAvailableFiles, backoff);
       }
     };
     
-    // Only load files when connected, with a small delay
-    if (connectionStatus === 'connected') {
-      // Small delay to ensure other components are initialized
+    if (connectionStatus === 'connected' && serviceApi) {
+      // Initial load with a short delay
       loadFilesTimeout = setTimeout(loadAvailableFiles, 1000);
     }
     
-    // Cleanup function
     return () => {
       isMounted = false;
-      if (loadFilesTimeout) {
-        clearTimeout(loadFilesTimeout);
-      }
+      if (loadFilesTimeout) clearTimeout(loadFilesTimeout);
     };
-  }, [connectionStatus]);
+  }, [connectionStatus, serviceApi]);
 
   // Generate a new chat ID
   const generateNewChatId = () => {
@@ -288,334 +279,297 @@ export default function ChatPageClient({
   };
   
   // Start a new chat session
-  const startNewSession = async () => {
+  const startNewSession = useCallback(async () => {
     const newChatId = generateNewChatId();
-    setChatId(newChatId);
-    setMessages([]);
-    const newSession: ChatSession = {
+    setChatId(newChatId); // Ensure chatId state is updated for FileSelector if needed
+    const newSessionData: ChatSession = {
       id: newChatId,
       name: `Chat ${new Date().toLocaleTimeString()}`,
       messages: [{
         id: uuidv4(),
-        sender: 'assistant', // Changed from 'bot'
+        sender: 'assistant', // Ensure sender is correctly typed
         content: "Hello! How can I assist you today?",
         timestamp: Date.now()
       }],
       lastModified: Date.now(),
+      selectedFiles: [] // Initialize with empty selected files
     };
     
-    setCurrentSession(newSession);
+    setCurrentSession(newSessionData);
+    setMessages(newSessionData.messages); // Set messages from the new session
     setUploadedFile(null);
     setDocumentSummary(null);
+    setSelectedFilesList([]); // Reset selected files list for new session
     
-    // Save to backend if connected
-    if (connectionStatus === 'connected') {
+    // Save to backend if connected, otherwise save locally
+    if (connectionStatus === 'connected' && serviceApi && typeof serviceApi.createChatSession === 'function') {
       try {
-        await api.createChatSession(newSession);
+        await serviceApi.createChatSession(newSessionData);
       } catch (error) {
-        console.error("Error saving chat session to backend:", error);
-        // Fallback to localStorage
-        saveChatSession(newSession);
-        toast({
-          title: "Offline Mode",
-          description: "Session saved locally. Connect to backend to sync.",
-          variant: "default",
-        });
+        console.error("Error saving new chat session to backend:", error);
+        saveChatSession(newSessionData); // Fallback to local
+        toast({ title: "Offline Mode", description: "New session saved locally.", variant: "default" });
       }
     } else {
-      // Save locally if offline
-      saveChatSession(newSession);
+      saveChatSession(newSessionData);
     }
-  };
+  }, [connectionStatus, serviceApi, toast]);
 
-  // Handle file selection change with better error tolerance
+  // Load chat history
+  const loadChatHistory = useCallback(async (id: string) => {
+    // Ensure serviceApi and its methods are available
+    if (!serviceApi || typeof serviceApi.getChatSessions !== 'function') {
+        console.warn('loadChatHistory: API service not fully initialized, falling back to local data');
+        const localHistory = getLocalChatHistory();
+        const localSession = localHistory.find(s => s.id === id);
+        if (localSession) {
+          setCurrentSession(localSession);
+          setSelectedFilesList(localSession.selectedFiles || []);
+        } else {
+          await startNewSession(); // await to ensure session is set
+        }
+        setIsLoading(false);
+        return;
+    }
+
+    try {
+      setIsLoading(true);
+      const sessions = await serviceApi.getChatSessions(); // Assuming this returns ChatSession[]
+      // Find the session by ID
+      const session = sessions.find((s: any) => s.id === id); // Use 'any' if structure is uncertain
+      
+      if (session) {
+        setCurrentSession(session);
+        setSelectedFilesList(session.selectedFiles || []);
+      } else {
+        // If not found on backend, try local
+        const localHistory = getLocalChatHistory();
+        const localSession = localHistory.find(s => s.id === id);
+        if (localSession) {
+          setCurrentSession(localSession);
+          setSelectedFilesList(localSession.selectedFiles || []);
+        } else {
+          await startNewSession(); // await
+        }
+      }
+    } catch (error) {
+      console.error("Error loading chat history:", error);
+      toast({ title: "Error", description: "Failed to load chat history.", variant: "destructive" });
+      await startNewSession(); // await
+    } finally {
+      setIsLoading(false);
+    }
+  }, [serviceApi, toast, startNewSession]);
+
+
+  // Effect for initializing chat: runs when initialChatId, loadChatHistory, or startNewSession changes.
+  useEffect(() => {
+    const initChat = async () => {
+      if (initialChatId) {
+        await loadChatHistory(initialChatId);
+      } else if (!currentSession) { // Only start new session if no current one and no initialChatId
+        await startNewSession();
+      }
+    };
+    initChat();
+  }, [initialChatId, loadChatHistory, startNewSession, currentSession]);
+
+
+  // Handle file selection change
   const handleFileSelectionChange = useCallback(async (files: string[]) => {
-    // Use JSON.stringify for deep comparison of arrays
+    // Prevent update if selection hasn't changed
     const currentFilesString = JSON.stringify(selectedFilesList);
     const newFilesString = JSON.stringify(files);
+    if (currentFilesString === newFilesString) return;
     
-    // Prevent unnecessary updates if files haven't changed
-    if (currentFilesString === newFilesString) {
-      return;
-    }
-    
-    // Update local state immediately for responsiveness
     setSelectedFilesList(files);
     
-    // Update current session with selected files
     if (currentSession) {
-      const updatedSession = {
-        ...currentSession,
-        selectedFiles: files,
-        lastModified: Date.now()
-      };
-      
-      // Update local state and save locally right away
+      const updatedSession = { ...currentSession, selectedFiles: files, lastModified: Date.now() };
       setCurrentSession(updatedSession);
-      saveChatSession(updatedSession);
+      saveChatSession(updatedSession); // Save locally immediately
       
-      // Only show feedback if files changed and user added files
+      // Notify user of selection change
       if (currentFilesString !== newFilesString && files.length > 0) {
-        toast({
-          title: "Files Selected",
-          description: `${files.length} file${files.length !== 1 ? 's' : ''} selected for context`,
-          variant: "default",
-        });
+        toast({ title: "Files Selected", description: `${files.length} file${files.length !== 1 ? 's' : ''} selected.`, variant: "default" });
       }
       
-      // Update backend in background (non-blocking) if connected
-      if (connectionStatus === 'connected') {
-        // Wrap in a try/catch to silently handle errors without disrupting UI
+      // Update backend if connected
+      if (connectionStatus === 'connected' && serviceApi && typeof serviceApi.updateFileSelection === 'function') {
         try {
-          await api.updateFileSelection({
-            sessionId: currentSession.id,
-            files: files
-          });
+          await serviceApi.updateFileSelection({ sessionId: currentSession.id, files: files });
         } catch (error) {
-          console.warn("Background file selection update failed:", error);
-          // No UI notification since this is a background operation
+          // Log error but don't block UI, local save is primary
+          console.warn("Background file selection update to backend failed:", error);
         }
       }
     }
-  }, [selectedFilesList, currentSession, connectionStatus, toast, api]);
+  }, [selectedFilesList, currentSession, connectionStatus, serviceApi, toast]);
 
   // Open file selector dialog
   const openFileSelector = useCallback(() => {
-    // Pre-check connection before opening dialog
     if (connectionStatus !== 'connected') {
-      toast({
-        title: "Backend Disconnected",
-        description: "File selection requires connection to the backend.",
-        variant: "destructive",
-      });
+      toast({ title: "Backend Disconnected", description: "File selection requires connection.", variant: "destructive" });
       return;
     }
     setIsFileDialogOpen(true);
   }, [connectionStatus, toast]);
 
-  // Send message to chat with improved empty message handling
+  // Send message to chat
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
-    
-    // Don't send empty messages
     if (!input.trim() || isWaitingForResponse) return;
 
     try {
       setIsWaitingForResponse(true);
+      const userMessage: ChatMessage = { id: Date.now().toString(), sender: "user", content: input, timestamp: Date.now() };
       
-      // Create message for local display
-      const userMessage: ChatMessage = {
-        id: Date.now().toString(),
-        sender: "user",
-        content: input,
-        timestamp: Date.now()
-      };
-      
-      // Add user message to state and also update current session
+      // Optimistically update UI with user's message
       setMessages(prevMessages => {
         const newMessages = [...prevMessages, userMessage];
-        // Update session with new messages
         if (currentSession) {
-          const updatedSession = {
-            ...currentSession,
-            messages: newMessages,
-            lastModified: Date.now()
-          };
+          const updatedSession = { ...currentSession, messages: newMessages, lastModified: Date.now() };
           setCurrentSession(updatedSession);
-          saveChatSession(updatedSession);
+          saveChatSession(updatedSession); // Save updated session locally
         }
         return newMessages;
       });
       
-      // Remember input then clear it
-      const sentInput = input;
-      setInput("");
+      const sentInput = input; // Store input before clearing
+      setInput(""); // Clear input field immediately
       
-      // Send to API with proper error handling
-      if (connectionStatus === 'connected' && typeof api.sendChatMessage === 'function') {
-        const response = await api.sendChatMessage({
+      // If connected, send to backend
+      if (connectionStatus === 'connected' && serviceApi && typeof serviceApi.sendChatMessage === 'function') {
+        // Apply settings to the request payload
+        const requestPayload = applySettingsToRequest({
           message: sentInput,
           selected_files: selectedFilesList,
-          sessionId: chatId
+          sessionId: chatId // Use the current chatId state
         });
+
+        const response = await serviceApi.sendChatMessage(requestPayload);
         
-        // Check if the response includes all messages
+        // Handle different response structures
         if (response && response.all_messages && Array.isArray(response.all_messages)) {
-          // Replace current messages with the complete history from the server
-          setMessages(response.all_messages);
+          setMessages(response.all_messages); // Backend provides full history
         } else if (response && response.message) {
-          // Fallback: just add the AI response to the existing messages
-          const aiMessage: ChatMessage = {
-            id: Date.now().toString(),
-            sender: "assistant",
-            content: response.message,
-            timestamp: Date.now()
-          };
-          
+          // Add AI message if only single response is returned
+          const aiMessage: ChatMessage = { id: Date.now().toString(), sender: "assistant", content: response.message, timestamp: Date.now() };
           setMessages(prevMessages => [...prevMessages, aiMessage]);
         }
         
-        // Update chat name if provided
+        // Update chat name if backend suggests one
         if (response && response.chat_name && currentSession) {
-          setCurrentSession({
-            ...currentSession,
-            name: response.chat_name
-          });
+          setCurrentSession({ ...currentSession, name: response.chat_name });
         }
       } else {
-        // Offline mode - just add a placeholder response
-        const offlineResponse: ChatMessage = {
-          id: Date.now().toString(),
-          sender: "assistant",
-          content: "I'm currently offline. Your message has been saved locally and will be processed when connection is restored.",
-          timestamp: Date.now(),
-          error: true
-        };
+        // Offline: Add a placeholder response
+        const offlineResponse: ChatMessage = { id: Date.now().toString(), sender: "assistant", content: "Offline. Message saved locally.", timestamp: Date.now(), error: true };
         setMessages(prevMessages => [...prevMessages, offlineResponse]);
       }
       
-      // Scroll to bottom after message is added
-      setTimeout(() => {
-        if (messagesContainerRef.current) {
-          messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
-        }
-      }, 100);
+      // Ensure scroll to bottom after messages update
+      setTimeout(() => { messagesContainerRef.current?.scrollTo({ top: messagesContainerRef.current.scrollHeight, behavior: 'smooth' }); }, 100);
       
     } catch (error) {
       console.error("Error sending message:", error);
-      
-      // Add error message to chat
-      const errorMessage: ChatMessage = {
-        id: Date.now().toString(),
-        sender: "assistant",
-        content: "Sorry, there was an error processing your message. Please try again.",
-        timestamp: Date.now(),
-        error: true
-      };
+      const errorMessage: ChatMessage = { id: Date.now().toString(), sender: "assistant", content: "Error processing message.", timestamp: Date.now(), error: true };
       setMessages(prevMessages => [...prevMessages, errorMessage]);
-      
-      toast({
-        title: "Error",
-        description: "Failed to send message. Please try again.",
-        variant: "destructive"
-      });
+      toast({ title: "Error", description: "Failed to send message.", variant: "destructive" });
     } finally {
       setIsWaitingForResponse(false);
     }
   };
 
-  // Process uploaded file with progress tracking
+  // Process uploaded file
   const processUploadedFile = useCallback(async (file: File) => {
+    if (!serviceApi || typeof serviceApi.uploadFile !== 'function' || typeof serviceApi.processDocument !== 'function') {
+        toast({ title: "API Error", description: "File processing service not available.", variant: "destructive" });
+        return;
+    }
     try {
       setIsSummarizing(true);
       setUploadProgress(0);
       setFileProcessingStep("Uploading file...");
       
-      // Upload file with progress tracking
-      const response = await api.uploadFile(file, (progress) => {
-        setUploadProgress(progress);
-      });
+      // Upload the file
+      const response = await serviceApi.uploadFile(file, (progress) => setUploadProgress(progress));
       
-      // Process document
+      // Process the document using returned fileId (which should be filename)
       setFileProcessingStep("Processing document...");
-      const result = await api.processDocument({
-        fileId: response.fileId,
-        fileName: response.fileName
-      });
+      const result = await serviceApi.processDocument({ fileId: response.filename, fileName: response.fileName }); // Ensure correct params
       
-      setDocumentSummary(result.summary || "Document processed successfully.");
+      setDocumentSummary(result.summary || "Document processed."); // Display summary
       
-      // Auto-add to chat if enabled
+      // Auto-select file if setting is enabled
       const uploadSettings = loadUploadSettings();
       if (uploadSettings.autoAddToChat) {
-        handleFileSelectionChange([...selectedFilesList, response.fileName]);
+        handleFileSelectionChange([...selectedFilesList, response.filename]); // Use filename from response
       }
       
-      toast({
-        title: "File processed",
-        description: "Your file has been successfully processed and is ready to use."
-      });
+      toast({ title: "File processed", description: "File ready to use." });
     } catch (error) {
       console.error("Error processing file:", error);
-      toast({
-        title: "Processing failed",
-        description: error instanceof Error ? error.message : "Failed to process the file.",
-        variant: "destructive"
-      });
+      toast({ title: "Processing failed", description: error instanceof Error ? error.message : "Failed to process file.", variant: "destructive" });
     } finally {
       setIsSummarizing(false);
-      setUploadProgress(100);
+      setUploadProgress(100); // Ensure progress shows complete
     }
-  }, [api, handleFileSelectionChange, selectedFilesList, toast]);
+  }, [serviceApi, handleFileSelectionChange, selectedFilesList, toast]);
 
   // Handle file upload
   const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
     
-    // Reset states
-    setUploadedFile(file);
-    setIsSummarizing(true);
-    setDocumentSummary(null);
-    setUploadProgress(0);
-    setFileProcessingStep("Uploading file...");
+    setUploadedFile(file); // Store the selected file
+    setIsSummarizing(true); // Start processing indicator
+    setDocumentSummary(null); // Clear previous summary
+    setUploadProgress(0); // Reset progress
+    setFileProcessingStep("Uploading file..."); // Set initial step
+
+    // Ensure API service is available
+    if (!serviceApi || typeof serviceApi.uploadFile !== 'function') {
+        toast({ title: "API Error", description: "File upload service not available.", variant: "destructive" });
+        setIsSummarizing(false);
+        setUploadedFile(null); // Clear file if service fails
+        return;
+    }
 
     try {
-      if (connectionStatus !== 'connected') {
-        throw new Error("Backend connection required for file processing");
-      }
+      // Check for backend connection
+      if (connectionStatus !== 'connected') throw new Error("Backend connection required for file upload.");
 
-      // Start file upload to backend
-      const uploadResponse = await api.uploadFile(
-        file,
-        (progress: number) => setUploadProgress(progress)
-      );
+      // Upload file and get backend-generated filename/ID
+      const uploadResponse = await serviceApi.uploadFile(file, (progress: number) => setUploadProgress(progress));
       
+      // Update UI to reflect processing state
       setFileProcessingStep("Processing document...");
       
-      // In our backend, processing happens during upload
-      // We'll just get the file ID and add it to selected files
-      const fileId = uploadResponse.fileId;
+      // Use the filename from the upload response (which is fileId in some contexts)
+      const backendFilename = uploadResponse.filename; 
+      const newSelectedFiles = [...selectedFilesList, backendFilename];
+      setSelectedFilesList(newSelectedFiles); // Auto-select the uploaded file
       
-      // Add the file to the selected files list
-      const newSelectedFiles = [...selectedFilesList, fileId];
-      setSelectedFilesList(newSelectedFiles);
-      
-      // Show success message
+      // Update processing step and notify user
       setFileProcessingStep("Ready for questions!");
-      toast({
-        title: "File Uploaded Successfully",
-        description: `${file.name} is now ready for questions!`,
-        variant: "default",
-      });
+      toast({ title: "File Uploaded", description: `${file.name} ready.`, variant: "default" });
+      setDocumentSummary(`File ${file.name} uploaded and selected for context.`);
       
-      // Create a standard summary message for uploaded files
-      setDocumentSummary(`File ${file.name} has been uploaded and is ready for questions. It has been automatically selected for chat context.`);
-      
-      // Update session with the new selected files
+      // Update current session with the newly selected file
       if (currentSession) {
-        const updatedSession = {
-          ...currentSession,
-          selectedFiles: newSelectedFiles,
-          lastModified: Date.now()
-        };
+        const updatedSession = { ...currentSession, selectedFiles: newSelectedFiles, lastModified: Date.now() };
         setCurrentSession(updatedSession);
-        saveChatSession(updatedSession);
+        saveChatSession(updatedSession); // Save session locally
       }
     } catch (error) {
       console.error("Error processing document:", error);
-      toast({
-        title: "Processing Error",
-        description: connectionStatus === 'connected' ? 
-          `Could not process ${file.name}. Please try a different file.` : 
-          "Backend connection required for file processing.",
-        variant: "destructive",
-      });
-      setDocumentSummary("Failed to process the document.");
-      setFileProcessingStep("Error processing file");
-      setUploadedFile(null);
+      toast({ title: "Processing Error", description: connectionStatus === 'connected' ? `Could not process ${file.name}.` : "Backend connection required.", variant: "destructive" });
+      setDocumentSummary("Failed to process document."); // Show error in summary area
+      setFileProcessingStep("Error during processing"); // Update step
+      setUploadedFile(null); // Clear uploaded file on error
     } finally {
-      setIsSummarizing(false);
+      setIsSummarizing(false); // End processing indicator
     }
   };
 
@@ -632,118 +586,18 @@ export default function ChatPageClient({
     setUploadProgress(0);
   }, []);
 
-  // If an initialChatId prop is provided, use it. Otherwise generate a new one
   const [chatId, setChatId] = useState<string>(initialChatId || generateNewChatId());
   
-  // First useEffect - handle initialization once on mount
+  // Handle selected files prop change
   useEffect(() => {
-    // Prevent the effect from running multiple times
-    const hasInitialized = useRef(false);
-    
-    if (hasInitialized.current) return;
-    hasInitialized.current = true;
-    
-    // Only create a new session if no initialChatId was provided
-    if (!initialChatId && !currentSession) {
-      startNewSession();
-    } else if (initialChatId && !currentSession) {
-      // Use the provided initialChatId directly - don't depend on chatId state
-      setCurrentSession({
-        id: initialChatId,
-        name: "New Chat",
-        messages: [{
-          id: uuidv4(),
-          sender: 'assistant', // Changed from 'bot'
-          content: "Hello! How can I assist you today?",
-          timestamp: Date.now()
-        }],
-        lastModified: Date.now(),
-        selectedFiles: []
-      });
-    }
-  }, []); // Empty dependency array, runs only once on mount
-
-  // Second useEffect - handle selected files separately
-  useEffect(() => {
-    // Skip this effect on first render to avoid conflicts with other initialization
-    const isFirstRender = useRef(true);
-    if (isFirstRender.current) {
-      isFirstRender.current = false;
-      return;
-    }
-    
-    // Load selected files from props if available
-    if (selectedFiles?.length > 0) {
+    // Only update if the prop actually changes and is different from current state
+    if (selectedFiles && JSON.stringify(selectedFiles) !== JSON.stringify(selectedFilesList)) {
       handleFileSelectionChange(selectedFiles);
     }
-  }, [selectedFiles, handleFileSelectionChange]);
-  
-  // Add a function to load chat history
-  const loadChatHistory = useCallback(async (id: string) => {
-    try {
-      setIsLoading(true);
-      
-      if (!api || typeof api.getChatSessions !== 'function') {
-        console.warn('API service not fully initialized, falling back to local data');
-        // Fall back to local history
-        const localHistory = getLocalChatHistory();
-        const localSession = localHistory.find(s => s.id === id);
-        
-        if (localSession) {
-          setCurrentSession(localSession);
-          setSelectedFilesList(localSession.selectedFiles || []);
-        } else {
-          // Create new session if no matching one found
-          startNewSession();
-        }
-        return;
-      }
-      
-      // Normal API flow if the function exists
-      const sessions = await api.getChatSessions();
-      const session = sessions.find((s: any) => s.id === id);
-      
-      if (session) {
-        setCurrentSession(session);
-        setSelectedFilesList(session.selectedFiles || []);
-      } else {
-        // Fall back to local
-        const localHistory = getLocalChatHistory();
-        const localSession = localHistory.find(s => s.id === id);
-        
-        if (localSession) {
-          setCurrentSession(localSession);
-          setSelectedFilesList(localSession.selectedFiles || []);
-        } else {
-          startNewSession();
-        }
-      }
-    } catch (error) {
-      console.error("Error loading chat history:", error);
-      toast({
-        title: "Error",
-        description: "Failed to load chat history.",
-        variant: "destructive"
-      });
-      startNewSession();
-    } finally {
-      setIsLoading(false);
-    }
-  }, [handleFileSelectionChange]);
-
-  // Update first useEffect to load history if chatId exists
-  useEffect(() => {
-    if (initialChatId) {
-      // Load existing chat
-      loadChatHistory(initialChatId);
-    } else {
-      // Create new chat
-      startNewSession();
-    }
-  }, [initialChatId, loadChatHistory]);
+  }, [selectedFiles, handleFileSelectionChange, selectedFilesList]);
   
   return (
-    <div className="flex flex-col h-[100vh] w-full overflow-hidden pt-3 pb-4">
+    <div className="flex flex-col flex-1 h-full w-full overflow-hidden pt-3 pb-4">
       <Card className="flex flex-col h-full border-0 shadow-2xl glassmorphic animated-smoke-bg">
         <CardHeader className="p-2 border-b border-border/50 shrink-0">
           <div className="flex justify-between items-center">
@@ -782,11 +636,10 @@ export default function ChatPageClient({
             </div>
           </div>
           
-          {/* Selected files display */}
           {selectedFilesList.length > 0 && (
             <div className="mt-1 p-1 rounded-md bg-secondary/20 text-secondary-foreground">
               <div className="flex flex-wrap gap-1">
-                {selectedFilesList.map((filename, index) => (
+                {selectedFilesList.slice(0,3).map((filename, index) => ( // Show only first 3
                   <Badge key={filename} variant="secondary" className="text-[10px] flex items-center gap-1 max-w-[150px]">
                     <FileText className="h-2 w-2" />
                     <span className="truncate">{filename.replace(/^\d+_/, '')}</span>
@@ -859,7 +712,6 @@ export default function ChatPageClient({
           )}
         </CardHeader>
         
-        {/* Chat messages area - only this section should scroll */}
         <div className="flex-1 overflow-y-auto p-2" ref={messagesContainerRef}>
           <div className="flex flex-col justify-end min-h-full">
             <div className="space-y-2">
@@ -879,7 +731,7 @@ export default function ChatPageClient({
                         : "bg-secondary text-secondary-foreground rounded-bl-none glassmorphic"
                     }`}
                   >
-                    <p className="whitespace-pre-wrap break-words line-clamp-6">{msg.content}</p>
+                    <p className="whitespace-pre-wrap break-words">{msg.content}</p>
                     {msg.citations && msg.citations.length > 0 && (
                       <div className="mt-1 border-t border-primary-foreground/20 pt-1">
                         <p className="text-[10px] font-semibold">Citations:</p>
@@ -895,13 +747,18 @@ export default function ChatPageClient({
                   </div>
                 </div>
               ))}
-              {isLoading && (
-                <div className="flex justify-start">
-                  <div className="max-w-[80%] p-2 rounded-lg shadow-sm bg-secondary text-secondary-foreground rounded-bl-none glassmorphic">
-                    <LoadingSpinner size="sm" />
-                  </div>
+              {isLoading && ( // General loading for session loading, not message sending
+                <div className="flex justify-center p-4">
+                  <LoadingSpinner size="md" />
                 </div>
               )}
+               {isWaitingForResponse && ( // Specific spinner for when AI is responding
+                <div className="flex justify-start">
+                    <div className="max-w-[80%] p-2 rounded-lg shadow-sm bg-secondary text-secondary-foreground rounded-bl-none glassmorphic">
+                        <LoadingSpinner size="sm" />
+                    </div>
+                </div>
+            )}
               {messages.length > visibleMessages.length && (
                 <div className="text-center text-[10px] text-muted-foreground">
                   {messages.length - visibleMessages.length} earlier messages not shown
@@ -941,7 +798,7 @@ export default function ChatPageClient({
               onChange={(e) => setInput(e.target.value)}
               placeholder={
                 connectionStatus !== 'connected' 
-                  ? "Backend disconnected. Limited functionality available." 
+                  ? "Backend disconnected." 
                   : (isSummarizing ? "Processing..." : "Type your message...")
               }
               className="flex-1 h-7 text-xs glassmorphic"
@@ -951,21 +808,20 @@ export default function ChatPageClient({
                   handleSendMessage(e as unknown as FormEvent);
                 }
               }}
-              disabled={isLoading || isSummarizing}
+              disabled={isWaitingForResponse || isSummarizing} // Disable when waiting for response or summarizing
             />
             <Button 
               type="submit" 
               size="icon" 
-              disabled={isLoading || isSummarizing || !input.trim()} 
+              disabled={isWaitingForResponse || isSummarizing || !input.trim()} 
               aria-label="Send message"
-              className={`h-7 w-7 transition-all bg-gradient-to-l from-[#FF297F] to-[#4B8FFF] ${(isLoading || !input.trim()) ? "opacity-50" : "opacity-100 hover:scale-105"}`}
+              className={`h-7 w-7 transition-all bg-gradient-to-l from-[#FF297F] to-[#4B8FFF] ${(isWaitingForResponse || isSummarizing || !input.trim()) ? "opacity-50" : "opacity-100 hover:scale-105"}`}
             >
-              {isLoading ? <LoadingSpinner size="sm" /> : <Send className="h-3 w-3" />}
+              {isWaitingForResponse ? <LoadingSpinner size="sm" /> : <Send className="h-3 w-3" />}
             </Button>
           </form>
         </CardFooter>
       </Card>
-      {/* File selector dialog */}
       <Dialog open={isFileDialogOpen} onOpenChange={setIsFileDialogOpen}>
         <DialogContent className="sm:max-w-[600px] p-0">
           <VisuallyHidden>
@@ -984,9 +840,10 @@ export default function ChatPageClient({
 
 interface ChatMessage {
   id: string;
-  sender: "user" | "assistant"; // Use a union type to enforce consistent values
+  sender: "user" | "assistant"; 
   content: string;
   timestamp: number;
   citations?: string[];
   error?: boolean;
 }
+
