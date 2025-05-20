@@ -6,7 +6,7 @@ import { Loader2, SendIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/components/ui/use-toast';
-import { useRouter } from 'next/router';
+import { useRouter } from 'next/navigation'; // Changed from 'next/router'
 import { Upload } from 'lucide-react';
 
 interface Message {
