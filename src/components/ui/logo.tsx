@@ -11,6 +11,7 @@ export function Logo({ className }: LogoProps) {
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
       className={className}
+      
     >
       <path
         d="M12 2L20 7V17L12 22L4 17V7L12 2Z"

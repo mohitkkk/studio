@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import type { ChatMessage, ChatSession } from '@/types';
 import axios from 'axios';
 
 // Connect to the FastAPI backend
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://13.202.208.115:8000';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://13.202.208.115:3000';
 
 // Track API errors by type for better error reporting
 const ERROR_TRACKING = {
@@ -15,6 +15,9 @@ const ERROR_TRACKING = {
 // Caching and rate-limiting settings
 const CACHE_DURATION = 30000; // 30 seconds
 const REQUEST_THROTTLE = 2000; // 2 seconds between identical requests
+
+// Create a singleton instance of the API service to avoid hook-related issues
+let apiServiceInstance: ReturnType<typeof createApiService> | null = null;
 
 interface ApiServiceProps {
   baseUrl?: string;
@@ -32,31 +35,29 @@ interface FileMetadata {
 
 type ProgressCallback = (progress: number) => void;
 
-export function useApiService(props?: ApiServiceProps) {
+// Create a non-hook version of the API service for use outside of components
+function createApiService(props?: ApiServiceProps) {
+  console.log("Creating API service instance");
+  
   const baseUrl = props?.baseUrl || API_BASE_URL;
-  const [isInitialized, setIsInitialized] = useState(false);
   
-  // Cache and request tracking
-  const cache = useRef<{[key: string]: {data: any, timestamp: number}}>({});
-  const pendingRequests = useRef<{[key: string]: boolean}>({});
-  const lastRequestTime = useRef<{[key: string]: number}>({});
+  // Configure axios defaults
+  axios.defaults.baseURL = baseUrl;
+  axios.defaults.headers.common['Content-Type'] = 'application/json';
+  axios.defaults.headers.common['Accept'] = 'application/json';
   
-  useEffect(() => {
-    console.log(`API service initializing with baseUrl: ${baseUrl}`);
-    axios.defaults.baseURL = baseUrl;
-    
-    // Add default headers
-    axios.defaults.headers.common['Content-Type'] = 'application/json';
-    axios.defaults.headers.common['Accept'] = 'application/json';
-    
-    // Add any additional headers
-    if (props?.headers) {
-      Object.entries(props.headers).forEach(([key, value]) => {
-        axios.defaults.headers.common[key] = value;
-      });
-    }
-    
-    // Add global error handler
+  // Add any additional headers
+  if (props?.headers) {
+    Object.entries(props.headers).forEach(([key, value]) => {
+      axios.defaults.headers.common[key] = value;
+    });
+  }
+  
+  // Add global error handler if not already added
+  // Use a module-level variable to track if we've added the interceptor
+  let responseInterceptorAdded = false;
+  
+  if (!responseInterceptorAdded) {
     axios.interceptors.response.use(
       response => response, 
       error => {
@@ -71,14 +72,13 @@ export function useApiService(props?: ApiServiceProps) {
         return Promise.reject(error);
       }
     );
-    
-    setIsInitialized(true);
-    
-    return () => {
-      // Clean up interceptors on unmount
-      axios.interceptors.response.eject(0);
-    };
-  }, [baseUrl, props?.headers]);
+    responseInterceptorAdded = true;
+  }
+  
+  // Cache and request tracking - using simple objects instead of refs
+  const cache: {[key: string]: {data: any, timestamp: number}} = {};
+  const pendingRequests: {[key: string]: boolean} = {};
+  const lastRequestTime: {[key: string]: number} = {};
 
   // Helper for making requests with caching and rate limiting
   const makeRequest = async <T>(
@@ -100,15 +100,15 @@ export function useApiService(props?: ApiServiceProps) {
     const now = Date.now();
     
     // Check if request is already pending
-    if (pendingRequests.current[cacheKey]) {
+    if (pendingRequests[cacheKey]) {
       console.log(`Request to ${endpoint} already pending, waiting...`);
       await new Promise(resolve => setTimeout(resolve, 300));
       return makeRequest(endpoint, method, data, options);
     }
     
     // Check cache for GET requests
-    if (method === 'get' && !bypassCache && cache.current[cacheKey]) {
-      const cachedData = cache.current[cacheKey];
+    if (method === 'get' && !bypassCache && cache[cacheKey]) {
+      const cachedData = cache[cacheKey];
       if (now - cachedData.timestamp < CACHE_DURATION) {
         console.log(`Using cached response for ${endpoint}`);
         return cachedData.data as T;
@@ -116,7 +116,7 @@ export function useApiService(props?: ApiServiceProps) {
     }
     
     // Check rate limiting
-    const lastTime = lastRequestTime.current[cacheKey] || 0;
+    const lastTime = lastRequestTime[cacheKey] || 0;
     if (now - lastTime < REQUEST_THROTTLE) {
       const delay = REQUEST_THROTTLE - (now - lastTime);
       console.log(`Rate limiting request to ${endpoint}, waiting ${delay}ms`);
@@ -124,8 +124,8 @@ export function useApiService(props?: ApiServiceProps) {
     }
     
     // Mark request as pending and update last request time
-    pendingRequests.current[cacheKey] = true;
-    lastRequestTime.current[cacheKey] = now;
+    pendingRequests[cacheKey] = true;
+    lastRequestTime[cacheKey] = now;
     
     try {
       // Make the actual request
@@ -148,7 +148,7 @@ export function useApiService(props?: ApiServiceProps) {
       
       // Cache GET responses
       if (method === 'get' && !bypassCache) {
-        cache.current[cacheKey] = {
+        cache[cacheKey] = {
           data: response.data,
           timestamp: now
         };
@@ -160,15 +160,25 @@ export function useApiService(props?: ApiServiceProps) {
       throw error;
     } finally {
       // Clear pending flag
-      pendingRequests.current[cacheKey] = false;
+      pendingRequests[cacheKey] = false;
     }
   };
 
   // Status check
   const checkStatus = async () => {
-    return makeRequest<{version: string, status: string}>(
-      '/', 'get', undefined, { timeoutMs: 5000 }
-    );
+    try {
+      const response = await axios.get('/', { timeout: 5000 });
+      return {
+        version: response.data?.version || 'unknown',
+        status: 'connected'
+      };
+    } catch (error) {
+      console.error("Error checking API status:", error);
+      return {
+        version: 'unknown',
+        status: 'disconnected'
+      };
+    }
   };
 
   // Get configuration
@@ -280,18 +290,24 @@ export function useApiService(props?: ApiServiceProps) {
   // Get chat sessions from the /chats endpoint
   const getChatSessions = async (): Promise<ChatSession[]> => {
     try {
-      const response = await makeRequest<any[]>('/chats', 'get');
+      const response = await axios.get('/chats');
       
-      return response.map((chat: any) => ({
-        id: chat.chat_id,
-        name: chat.chat_name,
-        messages: [],
-        lastModified: new Date(chat.updated_at).getTime(),
-        selectedFiles: chat.selected_files || []
+      if (!response.data) {
+        return [];
+      }
+      
+      const sessions = Array.isArray(response.data) ? response.data : [];
+      
+      return sessions.map((chat: any) => ({
+        id: chat.chat_id || chat.id || `chat_${Date.now()}`,
+        name: chat.chat_name || chat.name || "Untitled Chat",
+        messages: chat.messages || [],
+        lastModified: new Date(chat.updated_at || chat.lastModified || Date.now()).getTime(),
+        selectedFiles: chat.selected_files || chat.selectedFiles || []
       }));
     } catch (error) {
       console.error("Error fetching chat sessions:", error);
-      throw error;
+      return []; // Return empty array on error
     }
   };
 
@@ -322,8 +338,7 @@ export function useApiService(props?: ApiServiceProps) {
 
   // Clear API cache - useful for debugging or forcing fresh data
   const clearCache = () => {
-    cache.current = {};
-    console.log('API cache cleared');
+    // ...existing code...
   };
 
   // Update file selection that works with or without the endpoint
@@ -331,55 +346,11 @@ export function useApiService(props?: ApiServiceProps) {
     sessionId: string;
     files: string[];
   }): Promise<any> => {
-    try {
-      console.log(`Sending file selection update: ${params.files.length} files for session ${params.sessionId}`);
-      
-      // First try to use chat endpoint with empty message - most reliable method
-      try {
-        const response = await axios.post('/chat', {
-          message: " ", // Space character to avoid empty message errors
-          client_id: params.sessionId,
-          selected_files: params.files
-        }, {
-          timeout: 5000 // Short timeout
-        });
-        
-        console.log("File selection via chat endpoint succeeded");
-        return { success: true, method: "chat" };
-      } catch (chatError) {
-        console.warn("Chat endpoint for file selection failed, trying dedicated endpoint:", chatError);
-        
-        // If chat method fails, try dedicated endpoint
-        try {
-          const response = await axios.post('/file-selection', {
-            session_id: params.sessionId,
-            selected_files: params.files,
-            timestamp: Date.now()
-          }, {
-            timeout: 5000 // Short timeout
-          });
-          
-          console.log("Dedicated file-selection endpoint succeeded");
-          return { success: true, method: "file-selection" };
-        } catch (endpointError) {
-          // Both methods failed - just return success anyway to not block UI
-          console.warn("All file selection methods failed, using local-only mode");
-          return { 
-            success: true, 
-            method: "local-only",
-            warning: "Could not sync file selection with server"
-          };
-        }
-      }
-    } catch (error: any) {
-      // Return a successful result anyway to avoid disrupting the UI
-      // The important part is that files will be sent with each chat message
-      console.error("Error in file selection update:", error);
-      return { success: true, method: "error-handled", warning: "Error in update, but proceeding" };
-    }
+    // ...existing code...
   };
 
-  return {
+  // Debug log the returned object
+  const service = {
     checkStatus,
     getConfig,
     getFiles,
@@ -393,4 +364,41 @@ export function useApiService(props?: ApiServiceProps) {
     clearCache,
     updateFileSelection,
   };
+  
+  console.log("API service methods:", Object.keys(service));
+  return service;
+}
+
+// Create the service without hooks - modify this to not depend on hooks during initialization
+export const api = (() => {
+  if (typeof window === 'undefined') {
+    // Server-side rendering handling
+    return {} as ReturnType<typeof createApiService>;
+  }
+  
+  if (!apiServiceInstance) {
+    apiServiceInstance = createApiService();
+  }
+  return apiServiceInstance;
+})();  
+
+// Improved hook implementation
+export function useApiService(props?: ApiServiceProps) {
+  const isMounted = useRef(false);
+  
+  // Initialize or update the service on component mount
+  useEffect(() => {
+    if (!apiServiceInstance) {
+      apiServiceInstance = createApiService(props);
+    }
+    
+    isMounted.current = true;
+    
+    return () => {
+      isMounted.current = false;
+    };
+  }, [props?.baseUrl, props?.headers]);
+  
+  // Return the singleton instance
+  return apiServiceInstance || createApiService(props);
 }

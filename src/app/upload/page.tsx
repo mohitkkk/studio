@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useState, useRef, ChangeEvent } from 'react';
@@ -189,4 +188,3 @@ export default function FileUploadPage() {
   );
 }
 
-    

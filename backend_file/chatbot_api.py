@@ -53,6 +53,7 @@ class ChatRequest(BaseModel):
     top_p: PydanticOptional[float] = None
     system_prompt: PydanticOptional[str] = None
     # Response formatting options
+    format: PydanticOptional[str] = "html"  # Added format option with default "html"
     clean_response: PydanticOptional[bool] = None
     remove_hedging: PydanticOptional[bool] = None
     remove_references: PydanticOptional[bool] = None
@@ -73,6 +74,7 @@ class ChatResponse(BaseModel):
     message: str
     context: List[Dict] = []
     client_id: str = ""
+    format: str = "html"  # Added format field to response
 
 # Define chat history structure for storage
 class ChatHistory(BaseModel):
@@ -181,7 +183,7 @@ def load_chat_history(chat_id: str) -> Dict:
         logger.error(f"Error loading chat history for {chat_id}: {str(e)}")
         return None
 
-def save_chat_history(chat_id: str, chat_name: str, message: Dict, selected_files: List[str]) -> Dict:
+def save_chat_history(chat_id: str, chat_name: str, message: Dict = None, selected_files: List[str] = None) -> Dict:
     """Saves a message to chat history and returns the updated history."""
     try:
         history = load_chat_history(chat_id)
@@ -192,17 +194,19 @@ def save_chat_history(chat_id: str, chat_name: str, message: Dict, selected_file
             history = {
                 "chat_id": chat_id,
                 "chat_name": chat_name,
-                "messages": [message],
-                "selected_files": selected_files,
+                "messages": [] if message is None else [message],
+                "selected_files": selected_files or [],
                 "created_at": now,
                 "updated_at": now,
                 "ai_named": False
             }
         else:
             # Update existing history
-            history["messages"].append(message)
+            if message is not None:
+                history["messages"].append(message)
             history["updated_at"] = now
-            history["selected_files"] = selected_files
+            if selected_files is not None:
+                history["selected_files"] = selected_files
             
         # Save to file
         os.makedirs(CONFIG["chat_history_directory"], exist_ok=True)
@@ -1567,7 +1571,8 @@ def clean_response_language(
     custom_hedging_patterns: Optional[List[str]] = None,
     custom_reference_patterns: Optional[List[str]] = None,
     custom_disclaimer_patterns: Optional[List[str]] = None,
-    html_tags_to_fix: Optional[List[str]] = None
+    html_tags_to_fix: Optional[List[str]] = None,
+    format: str = "html"  # Added format parameter
 ) -> str:
     """Cleans the LLM response by removing hedging language, references, and disclaimers."""
     
@@ -1606,30 +1611,71 @@ def clean_response_language(
         for pattern in disclaimer_patterns:
             cleaned_response = re.sub(pattern, "", cleaned_response, flags=re.IGNORECASE)
     
-    # Ensure proper HTML structure if enabled
-    if ensure_html_structure:
-        tags_to_check = html_tags_to_fix or ["p", "div", "span", "h1", "h2", "h3", "h4", "ul", "ol", "li", "pre", "code"]
-        
-        # Add HTML wrapper if none exists and response is plain text
-        if not re.search(r'<\w+>', cleaned_response):
-            cleaned_response = f"<p>{cleaned_response}</p>"
-        
-        # Fix common unclosed tags
-        for tag in tags_to_check:
-            # Count opening and closing tags
-            open_tags = len(re.findall(f'<{tag}[^>]*>', cleaned_response, re.IGNORECASE))
-            close_tags = len(re.findall(f'</{tag}>', cleaned_response, re.IGNORECASE))
+    # Format-specific processing
+    if format.lower() == "html":
+        # Ensure proper HTML structure if enabled
+        if ensure_html_structure:
+            tags_to_check = html_tags_to_fix or ["p", "div", "span", "h1", "h2", "h3", "h4", "ul", "ol", "li", "pre", "code"]
             
-            # Add missing closing tags
-            for _ in range(open_tags - close_tags):
-                cleaned_response += f"</{tag}>"
+            # Add HTML wrapper if none exists and response is plain text
+            if not re.search(r'<\w+>', cleaned_response):
+                cleaned_response = f"<p>{cleaned_response}</p>"
+            
+            # Fix common unclosed tags
+            for tag in tags_to_check:
+                # Count opening and closing tags
+                open_tags = len(re.findall(f'<{tag}[^>]*>', cleaned_response, re.IGNORECASE))
+                close_tags = len(re.findall(f'</{tag}>', cleaned_response, re.IGNORECASE))
+                
+                # Add missing closing tags
+                for _ in range(open_tags - close_tags):
+                    cleaned_response += f"</{tag}>"
     
+    elif format.lower() == "markdown":
+        # Convert any HTML to Markdown if present (basic conversion)
+        # This is a simple implementation - for more complex HTML, consider using a library
+        
+        # Replace common HTML tags with Markdown
+        # Headers
+        cleaned_response = re.sub(r'<h1>(.*?)</h1>', r'# \1', cleaned_response, flags=re.IGNORECASE)
+        cleaned_response = re.sub(r'<h2>(.*?)</h2>', r'## \1', cleaned_response, flags=re.IGNORECASE)
+        cleaned_response = re.sub(r'<h3>(.*?)</h3>', r'### \1', cleaned_response, flags=re.IGNORECASE)
+        cleaned_response = re.sub(r'<h4>(.*?)</h4>', r'#### \1', cleaned_response, flags=re.IGNORECASE)
+        
+        # Lists
+        cleaned_response = re.sub(r'<ul>(.*?)</ul>', r'\1', cleaned_response, flags=re.IGNORECASE | re.DOTALL)
+        cleaned_response = re.sub(r'<ol>(.*?)</ol>', r'\1', cleaned_response, flags=re.IGNORECASE | re.DOTALL)
+        cleaned_response = re.sub(r'<li>(.*?)</li>', r'- \1\n', cleaned_response, flags=re.IGNORECASE)
+        
+        # Emphasis
+        cleaned_response = re.sub(r'<strong>(.*?)</strong>', r'**\1**', cleaned_response, flags=re.IGNORECASE)
+        cleaned_response = re.sub(r'<b>(.*?)</b>', r'**\1**', cleaned_response, flags=re.IGNORECASE)
+        cleaned_response = re.sub(r'<em>(.*?)</em>', r'*\1*', cleaned_response, flags=re.IGNORECASE)
+        cleaned_response = re.sub(r'<i>(.*?)</i>', r'*\1*', cleaned_response, flags=re.IGNORECASE)
+        
+        # Code
+        cleaned_response = re.sub(r'<code>(.*?)</code>', r'`\1`', cleaned_response, flags=re.IGNORECASE)
+        cleaned_response = re.sub(r'<pre>(.*?)</pre>', r'```\n\1\n```', cleaned_response, flags=re.IGNORECASE | re.DOTALL)
+        
+        # Links
+        cleaned_response = re.sub(r'<a href="(.*?)">(.*?)</a>', r'[\2](\1)', cleaned_response, flags=re.IGNORECASE)
+        
+        # Paragraphs
+        cleaned_response = re.sub(r'<p>(.*?)</p>', r'\1\n\n', cleaned_response, flags=re.IGNORECASE)
+        
+        # Remove other HTML tags
+        cleaned_response = re.sub(r'<[^>]*>', '', cleaned_response)
+        
+        # Fix common Markdown formatting issues
+        # Multiple consecutive line breaks
+        cleaned_response = re.sub(r'\n{3,}', '\n\n', cleaned_response)
+        
     # Strip leading/trailing whitespace
     cleaned_response = cleaned_response.strip()
     
     return cleaned_response
 
-# --- Response generation for no information cases ---
+# Update generate_no_information_response to support Markdown
 def generate_no_information_response(
     query: str,
     selected_files: List[str],
@@ -1637,7 +1683,8 @@ def generate_no_information_response(
     custom_message: Optional[str] = None,
     include_suggestions: bool = True,
     custom_suggestions: Optional[List[str]] = None,
-    html_format: bool = True
+    html_format: bool = True,
+    format: str = "html"  # Added format parameter
 ) -> str:
     """Generates a structured response when no relevant information is found."""
     
@@ -1649,6 +1696,7 @@ def generate_no_information_response(
         
     # Generate suggestions if requested
     suggestions_html = ""
+    suggestions_md = ""
     if include_suggestions:
         suggestion_list = custom_suggestions or [
             f"Try rephrasing your question with more specific terms",
@@ -1657,13 +1705,11 @@ def generate_no_information_response(
             f"Ask about the main topics covered in the document"
         ]
         
-        if html_format:
-            suggestions_html = "<ul>\n" + "\n".join([f"<li>{s}</li>" for s in suggestion_list]) + "\n</ul>"
-        else:
-            suggestions_html = "\n- " + "\n- ".join(suggestion_list)
+        suggestions_html = "<ul>\n" + "\n".join([f"<li>{s}</li>" for s in suggestion_list]) + "\n</ul>"
+        suggestions_md = "\n" + "\n".join([f"- {s}" for s in suggestion_list])
     
-    # Format the final response
-    if html_format:
+    # Format the final response based on requested format
+    if format.lower() == "html" or html_format:  # Maintain backward compatibility with html_format
         response = (
             f"<div class='no-info-response'>\n"
             f"<h3>{title}</h3>\n"
@@ -1671,11 +1717,11 @@ def generate_no_information_response(
             f"{suggestions_html}\n"
             f"</div>"
         )
-    else:
+    else:  # Markdown format
         response = (
-            f"{title}\n\n"
+            f"### {title}\n\n"
             f"{message}\n\n"
-            f"{suggestions_html}"
+            f"{suggestions_md}"
         )
         
     return response
@@ -1957,8 +2003,9 @@ async def ollama_chat_multifile_async(
     no_info_message: Optional[str] = None,
     include_suggestions: Optional[bool] = None,
     custom_suggestions: Optional[List[str]] = None,
-    no_info_html_format: Optional[bool] = None
+    no_info_html_format: Optional[bool] = None,
     # history: Optional[List[Dict[str, str]]] = None
+    format: str = "html",  # Add format parameter
 ) -> str:
     """
     Handles the chat interaction using Ollama with customizable parameters.
@@ -2007,6 +2054,7 @@ async def ollama_chat_multifile_async(
     if not files_with_content:
         logger.warning("No content in selected files, falling back to all available files.")
         files_with_content = content_by_file
+    logger.info(f"Selected files for context retrieval: {list(files_with_content.keys())}")
 
     # --- Context Retrieval: Attempt to Find Relevant Context First ---
     logger.info(f"Attempting to retrieve relevant context for query: '{user_input[:50]}...'")
@@ -2047,7 +2095,8 @@ async def ollama_chat_multifile_async(
              custom_message=no_info_message,
              include_suggestions=include_suggestions if include_suggestions is not None else True,
              custom_suggestions=custom_suggestions,
-             html_format=no_info_html_format if no_info_html_format is not None else True
+             html_format=no_info_html_format if no_info_html_format is not None else True,
+             format=format  # Pass the format parameter
          )
          logger.info(f"No information response generated: {no_info_response[:100]}...")
          return no_info_response
@@ -2069,21 +2118,22 @@ async def ollama_chat_multifile_async(
 
     # --- Call Ollama API ---
     try:
+        # Fix incorrect Ollama API call
         response = await asyncio.to_thread(
-            lambda: ollama.chat.completions.create(  # Fixed: Use ollama.chat instead of ollama.Chat
+            lambda: ollama.chat(
                 model=ollama_model,
                 messages=messages,
-                temperature=temperature,
-                top_p=top_p,
-                max_tokens=150, # Limit response length
-                n=1, # Number of responses
-                stream=False, # Disable streaming for simplicity
-                stop=None # No specific stop sequence
+                options={
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "num_predict": 150,  # Equivalent to max_tokens
+                }
             )
         )
 
         # --- Process Response ---
-        raw_response = response.choices[0].message.content.strip()
+        # The response structure might be different, adjust accordingly
+        raw_response = response["message"]["content"].strip()
         logger.info(f"Raw LLM Response: {raw_response[:200]}...")
         
         # Only clean if explicitly requested or defaulting to True
@@ -2098,7 +2148,8 @@ async def ollama_chat_multifile_async(
                 custom_hedging_patterns=custom_hedging_patterns,
                 custom_reference_patterns=custom_reference_patterns,
                 custom_disclaimer_patterns=custom_disclaimer_patterns,
-                html_tags_to_fix=html_tags_to_fix
+                html_tags_to_fix=html_tags_to_fix,
+                format=format  # Pass the format parameter
             )
         else:
             assistant_response = raw_response
@@ -2202,8 +2253,7 @@ async def http_chat(request: ChatRequest):
             similarity_threshold_override=request.similarity_threshold,
             temperature_override=request.temperature,
             top_p_override=request.top_p,
-            system_prompt_override=request.system_prompt,
-            clean_response_override=request.clean_response,
+            system_prompt_override=request.clean_response,
             remove_hedging=request.remove_hedging,
             remove_references=request.remove_references,
             remove_disclaimers=request.remove_disclaimers,
@@ -2216,7 +2266,8 @@ async def http_chat(request: ChatRequest):
             no_info_message=request.no_info_message,
             include_suggestions=request.include_suggestions,
             custom_suggestions=request.custom_suggestions,
-            no_info_html_format=request.no_info_html_format
+            no_info_html_format=request.no_info_html_format,
+            format=request.format or "html"  # Pass the format parameter
         )
         
         # 6. Save response to chat history
@@ -2232,11 +2283,12 @@ async def http_chat(request: ChatRequest):
             logger.info(f"Generating AI name for chat {client_id} after {len(updated_history['messages'])} messages")
             await generate_chat_name(client_id, updated_history["messages"], OLLAMA_CONFIG)
         
-        # 8. Return response with updated chat_id
+        # 8. Return response with updated chat_id and format
         return ChatResponse(
             message=response_text,
             context=[],  # Context is not being returned in this version
-            client_id=client_id
+            client_id=client_id,
+            format=request.format or "html"  # Include format in response
         )
 
     except Exception as e:
@@ -2304,6 +2356,169 @@ async def file_selection(
         logger.error(traceback.format_exc())
         # Return False instead of raising an exception to prevent 500 errors
         return False
+
+# Add a new endpoint for explicitly creating a new chat session
+@app.post("/new-chat", summary="Create a new chat session")
+async def create_new_chat():
+    """
+    Creates a new chat session and returns its ID.
+    Use this when starting a new conversation.
+    """
+    try:
+        # Generate a unique chat ID
+        chat_id = f"chat_{hashlib.md5(str(time.time() + random.random()).encode()).hexdigest()[:10]}"
+        
+        # Create initial chat history
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        new_history = {
+            "chat_id": chat_id,
+            "chat_name": "New Chat",
+            "messages": [],
+            "selected_files": [],
+            "created_at": now,
+            "updated_at": now,
+            "ai_named": False
+        }
+        
+        # Save the new chat history
+        os.makedirs(CONFIG["chat_history_directory"], exist_ok=True)
+        chat_file = os.path.join(CONFIG["chat_history_directory"], f"{chat_id}.json")
+        with open(chat_file, "w", encoding="utf-8") as f:
+            json.dump(new_history, f, indent=2)
+        
+        logger.info(f"Created new chat session with ID: {chat_id}")
+        
+        return {
+            "success": True,
+            "chat_id": chat_id,
+            "chat_name": "New Chat",
+            "created_at": now
+        }
+    except Exception as e:
+        logger.error(f"Error creating new chat: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Error creating new chat: {str(e)}")
+
+# Modify the existing HTTP chat endpoint to create a new session if none exists
+@app.post("/chat", summary="Process Chat Message", response_model=ChatResponse)
+async def http_chat(request: ChatRequest):
+    """
+    Handles a chat message via REST API.
+    Saves chat history and returns all messages in the response.
+    """
+    # Initialize client_id if not provided
+    client_id = request.client_id
+    if not client_id:
+        client_id = f"chat_{hashlib.md5(str(time.time() + random.random()).encode()).hexdigest()[:10]}"
+        logger.info(f"No client_id provided, created new chat: {client_id}")
+    
+    try:
+        # Load existing chat history
+        chat_history = load_chat_history(client_id)
+        if not chat_history:
+            # Create new chat history if it doesn't exist
+            chat_history = {
+                "chat_id": client_id,
+                "chat_name": "New Chat",
+                "messages": [],
+                "selected_files": [],
+                "created_at": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat(),
+                "ai_named": False
+            }
+        
+        # Add user message to history
+        from uuid import uuid4  # Add missing import
+        
+        user_message = {
+            "id": str(uuid4()),
+            "role": "user",
+            "content": request.message,
+            "timestamp": datetime.now().isoformat()
+        }
+        chat_history["messages"].append(user_message)
+        
+        # Save history with user message
+        save_chat_history(client_id, chat_history["chat_name"], user_message, request.selected_files)
+        
+        # Process the message using ollama_chat_multifile_async
+        # Read files content and generate embeddings
+        files_with_content = read_vault_content(request.selected_files)
+        embeddings_by_file = await generate_vault_embeddings(files_with_content)
+        
+        # Generate response from LLM
+        response_text = await ollama_chat_multifile_async(
+            user_input=request.message,
+            selected_files=request.selected_files,
+            embeddings_by_file=embeddings_by_file,
+            content_by_file=files_with_content,
+            client_id=client_id,
+            format=request.format or "html"  # Pass format parameter
+        )
+        
+        # Add AI response to history
+        ai_message = {
+            "id": str(uuid4()),
+            "role": "assistant",
+            "content": response_text,
+            "timestamp": datetime.now().isoformat()
+        }
+        chat_history["messages"].append(ai_message)
+        
+        # Update selected files if provided
+        if request.selected_files:
+            chat_history["selected_files"] = request.selected_files
+            
+        # Try to generate a better chat name if this is the first user message and AI hasn't named it yet
+        if len(chat_history["messages"]) <= 2 and not chat_history["ai_named"]:
+            try:
+                # Generate a descriptive name based on the user's first message
+                chat_name = generate_chat_name(request.message)
+                chat_history["chat_name"] = chat_name
+                chat_history["ai_named"] = True
+            except Exception as e:
+                logger.error(f"Error generating chat name: {str(e)}")
+                # Keep default name if generation fails
+                
+        # Save updated history with AI response
+        save_chat_history(client_id, chat_history)
+        
+        # Return response with ALL messages
+        return ChatResponse(
+            message=response_text,
+            context=[],
+            client_id=client_id,
+            all_messages=chat_history["messages"],
+            chat_name=chat_history["chat_name"]
+        )
+    except Exception as e:
+        logger.error(f"Error processing chat message: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Error processing chat: {str(e)}")
+
+# Add an endpoint to get chat history
+@app.get("/chat/{chat_id}", summary="Get Chat History")
+async def get_chat_history(chat_id: str):
+    """Retrieves chat history for a specific chat ID."""
+    try:
+        history = load_chat_history(chat_id)
+        return history
+    except Exception as e:
+        logger.error(f"Error retrieving chat history for {chat_id}: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Error retrieving chat history: {str(e)}")
+
+# Simple function to generate a chat name from the first message
+def generate_chat_name(message):
+    """Generate a short descriptive name for the chat based on the first message."""
+    try:
+        # Limit to 40 chars and remove any problematic characters
+        name = message.strip()
+        if len(name) > 40:
+            name = name[:37] + "..."
+        return name
+    except:
+        return "New Chat"
 
 # Initialize necessary directories and clients at startup
 def initialize_application():

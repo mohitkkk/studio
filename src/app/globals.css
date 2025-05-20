@@ -100,7 +100,7 @@ body {
     @apply bg-background text-foreground;
     /* Apply dark theme by default */
     @apply dark;
-    @apply overflow-y-hidden
+    @apply overflow-y-auto;
   }
 }
 
@@ -113,4 +113,132 @@ body {
   border-radius: var(--radius);
 }
 
-/* Other CSS remains unchanged */
+/* Enhanced HTML Content Styling */
+.html-content {
+  width: 100%;
+  overflow-x: auto;
+}
+
+/* Code block styling */
+.html-content pre {
+  background-color: hsl(var(--muted));
+  border-radius: 0.5rem;
+  padding: 1rem;
+  margin: 1rem 0;
+  font-size: 0.9rem;
+  overflow-x: auto;
+}
+
+.html-content pre code {
+  background-color: transparent !important;
+  padding: 0;
+  font-family: var(--font-mono);
+  color: white;
+}
+
+.html-content code {
+  font-family: var(--font-mono);
+  background-color: hsl(var(--muted));
+  padding: 0.2rem 0.4rem;
+  border-radius: 0.25rem;
+  font-size: 0.85em;
+}
+
+/* Table styling */
+.html-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1rem 0;
+  font-size: 0.9rem;
+}
+
+.html-content th,
+.html-content td {
+  border: 1px solid hsl(var(--border));
+  padding: 0.5rem;
+}
+
+.html-content th {
+  background-color: hsl(var(--muted));
+  font-weight: 600;
+}
+
+/* Block quote styling */
+.html-content blockquote {
+  border-left: 4px solid hsl(var(--primary));
+  padding-left: 1rem;
+  margin-left: 0;
+  color: hsl(var(--muted-foreground));
+}
+
+/* Lists styling */
+.html-content ul,
+.html-content ol {
+  padding-left: 1.5rem;
+}
+
+.html-content ul li,
+.html-content ol li {
+  margin-bottom: 0.5rem;
+}
+
+.html-content details {
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.5rem;
+  padding: 0.5rem;
+  margin: 1rem 0;
+}
+
+.html-content summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 0.5rem;
+}
+
+/* Custom class for "no information found" message */
+.html-content .no-info-response {
+  border-left: 4px solid hsl(var(--warning));
+  padding-left: 1rem;
+  background-color: hsl(var(--warning) / 0.1);
+  border-radius: 0.5rem;
+  padding: 1rem;
+}
+
+/* Add these styles to help with message visibility */
+
+.message-container {
+  margin-bottom: 1rem;
+  overflow-anchor: none;
+}
+
+.message-content {
+  min-height: 2rem;
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+  word-break: break-word;
+}
+
+.user-message .message-content {
+  background-color: hsl(var(--primary) / 0.15);
+  color: hsl(var(--primary-foreground));
+}
+
+.assistant-message .message-content {
+  background-color: hsl(var(--muted));
+  color: hsl(var(--muted-foreground));
+}
+
+/* Add smooth scrolling for messages container */
+.messages-container {
+  scroll-behavior: smooth;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Anchor for auto-scrolling */
+.messages-end-anchor {
+  height: 1px;
+  width: 100%;
+  overflow-anchor: auto;
+}
+

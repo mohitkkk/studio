@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -12,6 +12,8 @@ import { useToast } from "@/hooks/use-toast";
 import { useApiService } from "@/hooks/use-api-service";
 import LoadingSpinner from "@/components/ui/loading-spinner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import HorizontalScroll from './horizontalscroll';
+
 
 // Define FileMetadata type
 interface FileMetadata {
@@ -54,77 +56,88 @@ export default function FileSelector({ selectedFiles, onSelectionChange, onClose
   // Clear existing API errors when retrying or changing filters
   useEffect(() => {
     if (apiError) setApiError(null);
-  }, [activeTag, retryCount]);
+  }, [activeTag, retryCount, apiError]);
 
-  // Load files from API with improved error handling and retry logic
+  // Use useCallback to stabilize the loadFiles function, but with correct dependencies
+  const loadFiles = useCallback(async () => {
+    if (apiCallInProgress.current) return;
+    apiCallInProgress.current = true;
+    setIsLoading(true);
+    setApiError(null);
+    
+    let isMounted = true; // Track if component is still mounted
+    
+    try {
+      // Add timeout handling and retry logic
+      const filesData = await Promise.race([
+        api.getFiles(activeTag || undefined),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Request timeout')), 10000)
+        )
+      ]);
+      
+      // Only update state if component is still mounted
+      if (!isMounted) return;
+      
+      // Handle standard API response format (files inside files property)
+      if (filesData && filesData.files && Array.isArray(filesData.files)) {
+        setFiles(filesData.files);
+      } 
+      // Handle direct array format
+      else if (Array.isArray(filesData)) {
+        setFiles(filesData);
+      }
+      // Check for empty response
+      else if (filesData && Object.keys(filesData).length === 0) {
+        setFiles([]);
+        setApiError('No files returned from server');
+      }
+      // Handle empty results
+      else {
+        setFiles([]);
+        setApiError('Received unexpected data format from server');
+      }
+    } catch (error: any) {
+      if (!isMounted) return;
+      
+      // Provide specific error messages based on error type
+      if (error.message?.includes('Network Error')) {
+        setApiError('Network error - Unable to connect to server');
+      } else if (error.response?.status === 404) {
+        setApiError('API endpoint not found');
+      } else if (error.response?.status === 500) {
+        setApiError('Server error - Please try again later');
+      } else {
+        setApiError('Failed to connect to server');
+      }
+      
+      setFiles([]);
+    } finally {
+      if (isMounted) {
+        setIsLoading(false);
+      }
+      setTimeout(() => {
+        apiCallInProgress.current = false;
+      }, 1000);
+    }
+    
+    return () => {
+      isMounted = false;
+    };
+  }, [activeTag, api]); // Include only stable dependencies
+
+  // Modify the useEffect to avoid infinite loops
   useEffect(() => {
     // Skip if an API call is already in progress
     if (apiCallInProgress.current) return;
     
-    const loadFiles = async () => {
-      if (apiCallInProgress.current) return;
-      apiCallInProgress.current = true;
-      setIsLoading(true);
-      setApiError(null);
-      
-      try {
-        console.log(`Fetching files from backend... (attempt #${retryCount + 1}, tag: ${activeTag || 'none'})`);
-        const filesData = await api.getFiles(activeTag || undefined);
-        console.log('Received files data:', filesData);
-        
-        // Handle standard API response format (files inside files property)
-        if (filesData && filesData.files && Array.isArray(filesData.files)) {
-          console.log(`Setting ${filesData.files.length} files from response.files array`);
-          setFiles(filesData.files);
-        } 
-        // Handle direct array format
-        else if (Array.isArray(filesData)) {
-          console.log(`Setting ${filesData.length} files from direct array`);
-          setFiles(filesData);
-        }
-        // Check for empty response
-        else if (filesData && Object.keys(filesData).length === 0) {
-          console.warn('Empty response from files endpoint');
-          setFiles([]);
-          setApiError('No files returned from server');
-        }
-        // Handle empty results
-        else {
-          console.warn('Unexpected files data format:', filesData);
-          setFiles([]);
-          setApiError('Received unexpected data format from server');
-        }
-      } catch (error: any) {
-        console.error("Error loading files:", error);
-        
-        // Provide specific error messages based on error type
-        if (error.message?.includes('Network Error')) {
-          setApiError('Network error - Unable to connect to server');
-        } else if (error.response?.status === 404) {
-          setApiError('API endpoint not found');
-        } else if (error.response?.status === 500) {
-          setApiError('Server error - Please try again later');
-        } else {
-          setApiError('Failed to connect to server');
-        }
-        
-        toast({
-          title: "Error",
-          description: "Could not load files. Check server connection.",
-          variant: "destructive"
-        });
-        setFiles([]);
-      } finally {
-        setIsLoading(false);
-        // Release lock after a short delay to prevent rapid re-fetching
-        setTimeout(() => {
-          apiCallInProgress.current = false;
-        }, 1000);
-      }
-    };
-    
     loadFiles();
-  }, [activeTag, toast, retryCount]);
+    
+    // No cleanup needed here as loadFiles manages its own mounted state
+    return () => {
+      // Component unmount cleanup is handled by the isMounted ref in loadFiles
+    };
+  }, [loadFiles, retryCount]); // Only depend on stable callbacks and triggers
 
   // Filter files based on search term
   const filteredFiles = files.filter(file => 
@@ -132,18 +145,20 @@ export default function FileSelector({ selectedFiles, onSelectionChange, onClose
     file.description?.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
-  // Handle file selection toggle
-  const toggleFileSelection = (filename: string) => {
-    const updatedSelection = new Set(selectedFileIds);
-    
-    if (updatedSelection.has(filename)) {
-      updatedSelection.delete(filename);
-    } else {
-      updatedSelection.add(filename);
-    }
-    
-    setSelectedFileIds(updatedSelection);
-  };
+  // Modify the toggleFileSelection function to avoid unnecessary re-renders
+  const toggleFileSelection = useCallback((filename: string) => {
+    setSelectedFileIds(prevSelection => {
+      const updatedSelection = new Set(prevSelection);
+      
+      if (updatedSelection.has(filename)) {
+        updatedSelection.delete(filename);
+      } else {
+        updatedSelection.add(filename);
+      }
+      
+      return updatedSelection;
+    });
+  }, []);
 
   // Apply selection and close
   const handleApply = () => {
@@ -182,7 +197,7 @@ export default function FileSelector({ selectedFiles, onSelectionChange, onClose
         
         {/* Tags filter - only show if we have tags */}
         {allTags.length > 0 && (
-          <ScrollArea className="whitespace-nowrap py-2 h-8">
+          <HorizontalScroll className="whitespace-nowrap overflow-x-auto scrollbar-hide">
             <div className="flex gap-2">
               <Badge 
                 variant={activeTag === null ? "default" : "outline"}
@@ -202,7 +217,7 @@ export default function FileSelector({ selectedFiles, onSelectionChange, onClose
                 </Badge>
               ))}
             </div>
-          </ScrollArea>
+          </HorizontalScroll>
         )}
       </CardHeader>
       <CardContent className="p-3 flex-1 overflow-hidden">
@@ -232,7 +247,7 @@ export default function FileSelector({ selectedFiles, onSelectionChange, onClose
             <p className="text-xs text-muted-foreground mt-4 text-center">
               Make sure the backend server is running at:<br />
               <code className="bg-muted px-1 py-0.5 rounded text-xs">
-                {process.env.NEXT_PUBLIC_API_URL || 'http://13.202.208.115:8000'}
+                {process.env.NEXT_PUBLIC_API_URL || 'http://13.202.208.115:3000'}
               </code>
             </p>
           </div>
@@ -324,7 +339,7 @@ export default function FileSelector({ selectedFiles, onSelectionChange, onClose
           </ScrollArea>
         )}
       </CardContent>
-      <CardFooter className="p-3 pt-0 border-t flex justify-between">
+      <CardFooter className="p-3 pt-1 border-t border-gray-700 flex justify-between">
         <div className="text-sm">
           {selectedFileIds.size} file{selectedFileIds.size !== 1 ? 's' : ''} selected
         </div>

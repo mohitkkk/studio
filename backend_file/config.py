@@ -9,7 +9,7 @@ from typing import Dict, Any
 # Server configuration
 SERVER_CONFIG = {
     "host": "0.0.0.0",  # Listen on all interfaces
-    "port": 8000,
+    "port": 3000,
     "public_ip": "13.202.208.115",  # Public-facing IP
     "cors_origins": ["*"],  # For development; restrict in production
     "reload": False,     # Set to True during development

@@ -1,20 +1,24 @@
-"use client";
-
-import { useState, useRef, useEffect, FormEvent, useCallback } from "react";
+'use client'
+import { useCallback, useEffect, useRef, useState, FormEvent } from "react";
 import type { ChangeEvent } from 'react';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Paperclip, Send, FileText, Trash2, FolderOpen, XCircle } from "lucide-react";
 import LoadingSpinner from "@/components/ui/loading-spinner";
-import type { ChatMessage, ChatSession } from "@/types";
+import type { ChatSession } from "@/types";
 import { useToast } from "@/hooks/use-toast";
 import { v4 as uuidv4 } from 'uuid';
-import { useApiService } from "@/hooks/use-api-service";
+import { useConnectionStatus } from "@/hooks/use-connection-status";
+import { api, useApiService } from "@/hooks/use-api-service";
 import FileSelector from "./file-selector"; 
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { VisuallyHidden } from "@/components/ui/visually-hidden";
+import { applySettingsToRequest } from "@/lib/settings";
+
+// Import settings functions
+import { loadUploadSettings, getChatRequestSettings } from "@/lib/settings-api";
 
 // Mock function for saving/loading chat history from localStorage
 const CHAT_HISTORY_KEY = "nebulaChatHistory";
@@ -22,7 +26,7 @@ const CHAT_HISTORY_KEY = "nebulaChatHistory";
 const saveChatSession = (session: ChatSession) => {
   try {
     if (typeof window === 'undefined') return;
-    const history = loadChatHistory();
+    const history = getLocalChatHistory();
     const existingIndex = history.findIndex(s => s.id === session.id);
     if (existingIndex > -1) {
       history[existingIndex] = session;
@@ -35,7 +39,7 @@ const saveChatSession = (session: ChatSession) => {
   }
 };
 
-const loadChatHistory = (): ChatSession[] => {
+const getLocalChatHistory = (): ChatSession[] => {
   try {
     if (typeof window === 'undefined') return [];
     const historyJson = localStorage.getItem(CHAT_HISTORY_KEY);
@@ -46,32 +50,36 @@ const loadChatHistory = (): ChatSession[] => {
   }
 };
 
-export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?: string[] }) {
+export default function ChatPageClient({ 
+  selectedFiles = [], 
+  initialChatId = "" 
+}: { 
+  selectedFiles?: string[],
+  initialChatId?: string
+}) {
+  // Initialize API service
+  const api = useApiService();
+  
   // State variables
   const [currentSession, setCurrentSession] = useState<ChatSession | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [visibleMessages, setVisibleMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
-  const [documentContent, setDocumentContent] = useState<string | null>(null);
-  const [documentSummary, setDocumentSummary] = useState<string | null>(null);
-  const [isSummarizing, setIsSummarizing] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [fileProcessingStep, setFileProcessingStep] = useState<string | null>(null);
   const [isFileDialogOpen, setIsFileDialogOpen] = useState(false);
-  const [selectedFilesList, setSelectedFilesList] = useState<string[]>(selectedFiles);
-  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'connecting'>('disconnected');
+  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'connecting'>('connecting');
   const [backendVersion, setBackendVersion] = useState<string | null>(null);
-
-  // Refs
+  const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [isSummarizing, setIsSummarizing] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [fileProcessingStep, setFileProcessingStep] = useState("");
+  const [documentSummary, setDocumentSummary] = useState<string | null>(null);
+  const [selectedFilesList, setSelectedFilesList] = useState<string[]>(selectedFiles);
   const { toast } = useToast();
   
-  // API service hook
-  const api = useApiService();
-
   // Check backend connection on component mount - with throttling
   useEffect(() => {
     // Avoid multiple connection checks running in parallel
@@ -83,14 +91,24 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
       
       setConnectionStatus('connecting');
       try {
-        const status = await api.checkStatus();
+        // Try to use getConfig instead of checkStatus
+        // If getConfig is also unavailable, fall back to a simple GET request
+        try {
+          if (typeof api.getConfig === 'function') {
+            await api.getConfig();
+          } else {
+            // Simple ping test using any available method
+            await api.getChatSessions();
+          }
+        } catch (specificError) {
+          console.warn("First connection check method failed:", specificError);
+          // One more attempt with different method as fallback
+          await api.getChatSessions();
+        }
         
         if (!isMounted) return;
         setConnectionStatus('connected');
-        setBackendVersion(status.version);
-        
-        // Optional: Load any server config
-        const config = await api.getConfig();
+        setBackendVersion('connected'); // No version info available
         
         // Schedule next check after a reasonable interval
         connectionCheckTimeout = setTimeout(checkConnection, 30000); // 30 seconds
@@ -121,7 +139,7 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
         clearTimeout(connectionCheckTimeout);
       }
     };
-  }, []);
+  }, [toast]); // Only include toast in dependencies, not api
 
   // Keep only messages that fit in the container
   useEffect(() => {
@@ -145,16 +163,22 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
       if (connectionStatus !== 'connected') return;
       
       try {
-        const sessions = await api.getChatSessions();
-        if (sessions.length > 0) {
-          setCurrentSession(sessions[0]); // Load most recent session
+        // Check if method exists before calling it
+        if (typeof api.getChatSessions === 'function') {
+          const sessions = await api.getChatSessions();
+          if (sessions && sessions.length > 0) {
+            setCurrentSession(sessions[0]);
+          } else {
+            startNewSession();
+          }
         } else {
+          console.warn('getChatSessions method not available on API');
           startNewSession();
         }
       } catch (error) {
         console.error("Error loading chat sessions:", error);
         // Fallback to localStorage or create new session
-        const localSessions = loadChatHistory();
+        const localSessions = getLocalChatHistory();
         if (localSessions.length > 0) {
           setCurrentSession(localSessions[0]);
         } else {
@@ -170,7 +194,7 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
 
   // Start a new session or load latest one
   useEffect(() => {
-    const history = loadChatHistory();
+    const history = getLocalChatHistory();
     if (history.length > 0 && !currentSession) {
       startNewSession();
     } else if (!currentSession) {
@@ -181,7 +205,15 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
   // Load messages from current session
   useEffect(() => {
     if (currentSession) {
-      setMessages(currentSession.messages);
+      // Map the messages to ensure the sender property matches the expected union type
+      const mappedMessages = currentSession.messages.map(msg => ({
+        ...msg,
+        sender: (msg.sender === "user" || msg.sender === "assistant") 
+          ? msg.sender as "user" | "assistant" 
+          : "assistant" // Default fallback
+      }));
+      setMessages(mappedMessages);
+      
       if (currentSession.documentContext) {
         setDocumentSummary(currentSession.documentContext.summary || null);
       }
@@ -250,24 +282,30 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
     };
   }, [connectionStatus]);
 
+  // Generate a new chat ID
+  const generateNewChatId = () => {
+    return `chat_${Math.random().toString(36).substring(2, 10)}_${Date.now()}`;
+  };
+  
   // Start a new chat session
   const startNewSession = async () => {
+    const newChatId = generateNewChatId();
+    setChatId(newChatId);
+    setMessages([]);
     const newSession: ChatSession = {
-      id: uuidv4(),
+      id: newChatId,
       name: `Chat ${new Date().toLocaleTimeString()}`,
       messages: [{
         id: uuidv4(),
-        sender: 'bot',
-        content: "Hello! How can I assist you today? Upload a document or ask a question.",
+        sender: 'assistant', // Changed from 'bot'
+        content: "Hello! How can I assist you today?",
         timestamp: Date.now()
       }],
       lastModified: Date.now(),
     };
     
     setCurrentSession(newSession);
-    setMessages(newSession.messages);
     setUploadedFile(null);
-    setDocumentContent(null);
     setDocumentSummary(null);
     
     // Save to backend if connected
@@ -291,7 +329,16 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
   };
 
   // Handle file selection change with better error tolerance
-  const handleFileSelectionChange = async (files: string[]) => {
+  const handleFileSelectionChange = useCallback(async (files: string[]) => {
+    // Use JSON.stringify for deep comparison of arrays
+    const currentFilesString = JSON.stringify(selectedFilesList);
+    const newFilesString = JSON.stringify(files);
+    
+    // Prevent unnecessary updates if files haven't changed
+    if (currentFilesString === newFilesString) {
+      return;
+    }
+    
     // Update local state immediately for responsiveness
     setSelectedFilesList(files);
     
@@ -307,10 +354,8 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
       setCurrentSession(updatedSession);
       saveChatSession(updatedSession);
       
-      // Only show feedback if files changed
-      const filesChanged = JSON.stringify(currentSession.selectedFiles || []) !== JSON.stringify(files);
-      
-      if (filesChanged && files.length > 0) {
+      // Only show feedback if files changed and user added files
+      if (currentFilesString !== newFilesString && files.length > 0) {
         toast({
           title: "Files Selected",
           description: `${files.length} file${files.length !== 1 ? 's' : ''} selected for context`,
@@ -320,20 +365,22 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
       
       // Update backend in background (non-blocking) if connected
       if (connectionStatus === 'connected') {
-        // Don't await this call - let it run asynchronously
-        api.updateFileSelection({
-          sessionId: currentSession.id,
-          files: files
-        }).catch(error => {
+        // Wrap in a try/catch to silently handle errors without disrupting UI
+        try {
+          await api.updateFileSelection({
+            sessionId: currentSession.id,
+            files: files
+          });
+        } catch (error) {
           console.warn("Background file selection update failed:", error);
           // No UI notification since this is a background operation
-        });
+        }
       }
     }
-  };
-  
+  }, [selectedFilesList, currentSession, connectionStatus, toast, api]);
+
   // Open file selector dialog
-  const openFileSelector = () => {
+  const openFileSelector = useCallback(() => {
     // Pre-check connection before opening dialog
     if (connectionStatus !== 'connected') {
       toast({
@@ -344,166 +391,162 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
       return;
     }
     setIsFileDialogOpen(true);
-  };
-  
+  }, [connectionStatus, toast]);
+
   // Send message to chat with improved empty message handling
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
-    const trimmedInput = input.trim();
     
-    // Check if we should allow sending
-    if (!trimmedInput && !uploadedFile && selectedFilesList.length === 0) return;
-
-    // Create user message
-    const userMessage: ChatMessage = {
-      id: uuidv4(),
-      sender: "user",
-      content: trimmedInput || " ", // Use space for empty messages
-      timestamp: Date.now(),
-    };
-    
-    // Update UI immediately
-    const updatedMessages = [...messages, userMessage];
-    setMessages(updatedMessages);
-    setInput("");
-    setIsLoading(true);
-
-    let botMessage: ChatMessage;
+    // Don't send empty messages
+    if (!input.trim() || isWaitingForResponse) return;
 
     try {
-      // Start timeout for detecting slow responses
-      const timeoutId = setTimeout(() => {
-        if (isLoading) {
-          toast({
-            title: "Taking longer than expected",
-            description: "The AI is processing your request. This might take a moment.",
-            variant: "default",
-          });
-        }
-      }, 10000); // 10 seconds timeout warning
+      setIsWaitingForResponse(true);
       
-      if (connectionStatus === 'connected') {
-        try {
-          // Always send at least a space character to avoid empty message errors
-          const messageToSend = trimmedInput || " ";
+      // Create message for local display
+      const userMessage: ChatMessage = {
+        id: Date.now().toString(),
+        sender: "user",
+        content: input,
+        timestamp: Date.now()
+      };
+      
+      // Add user message to state and also update current session
+      setMessages(prevMessages => {
+        const newMessages = [...prevMessages, userMessage];
+        // Update session with new messages
+        if (currentSession) {
+          const updatedSession = {
+            ...currentSession,
+            messages: newMessages,
+            lastModified: Date.now()
+          };
+          setCurrentSession(updatedSession);
+          saveChatSession(updatedSession);
+        }
+        return newMessages;
+      });
+      
+      // Remember input then clear it
+      const sentInput = input;
+      setInput("");
+      
+      // Send to API with proper error handling
+      if (connectionStatus === 'connected' && typeof api.sendChatMessage === 'function') {
+        const response = await api.sendChatMessage({
+          message: sentInput,
+          selected_files: selectedFilesList,
+          sessionId: chatId
+        });
+        
+        // Check if the response includes all messages
+        if (response && response.all_messages && Array.isArray(response.all_messages)) {
+          // Replace current messages with the complete history from the server
+          setMessages(response.all_messages);
+        } else if (response && response.message) {
+          // Fallback: just add the AI response to the existing messages
+          const aiMessage: ChatMessage = {
+            id: Date.now().toString(),
+            sender: "assistant",
+            content: response.message,
+            timestamp: Date.now()
+          };
           
-          // Use backend API for chat with selected files
-          const response = await api.sendChatMessage({
-            sessionId: currentSession?.id,
-            message: messageToSend,
-            selected_files: selectedFilesList
+          setMessages(prevMessages => [...prevMessages, aiMessage]);
+        }
+        
+        // Update chat name if provided
+        if (response && response.chat_name && currentSession) {
+          setCurrentSession({
+            ...currentSession,
+            name: response.chat_name
           });
-          
-          clearTimeout(timeoutId);
-          
-          // Create bot message from successful response
-          botMessage = {
-            id: uuidv4(),
-            sender: "bot",
-            content: response.message || response.answer || "I processed your request but couldn't generate a proper response.",
-            timestamp: Date.now(),
-            citations: response.citations || response.context || [],
-          };
-        } catch (apiError: any) {
-          clearTimeout(timeoutId);
-          console.error("Backend API error:", apiError);
-          
-          // More specific handling of Ollama errors
-          let errorMessage = "Sorry, I encountered an error processing your request.";
-          let errorDetail = "";
-          let isOllamaError = false;
-          
-          // Check for specific error types with improved detection
-          if (apiError.message?.includes('Ollama') || 
-              apiError.message?.includes('ollama') ||
-              apiError.message?.includes('completions') ||
-              apiError.message?.includes('LLM')) {
-            
-            isOllamaError = true;
-            errorMessage = "The AI model is currently experiencing technical issues.";
-            errorDetail = "The server administrator has been notified. This might be due to an issue with the Ollama API or model configuration.";
-            
-            // Show admin-targeted toast for easier debugging
-            toast({
-              title: "Ollama API Error",
-              description: `Error: ${apiError.message}. Check backend logs for details.`,
-              variant: "destructive",
-              duration: 10000,
-            });
-          } else if (apiError.message?.includes('Network error')) {
-            errorMessage = "Connection to the backend server was lost.";
-            errorDetail = "Please check your network connection and try again later.";
-            
-            // Potentially set connection status to disconnected
-            setConnectionStatus('disconnected');
-          }
-          
-          // Create error message with more details and styling
-          botMessage = {
-            id: uuidv4(),
-            sender: "bot",
-            content: `<div class="error-message">
-                        <p><strong>${errorMessage}</strong></p>
-                        ${errorDetail ? `<p class="error-detail">${errorDetail}</p>` : ''}
-                        ${isOllamaError ? `
-                        <p class="error-help">Try these options:</p>
-                        <ul>
-                          <li>Wait a few minutes and try again</li>
-                          <li>Try a simpler query without complex instructions</li>
-                          <li>Contact the administrator about the Ollama API error</li>
-                        </ul>` : ''}
-                      </div>`,
-            timestamp: Date.now(),
-            error: true,
-          };
         }
       } else {
-        // Offline mode response
-        clearTimeout(timeoutId);
-        botMessage = {
-          id: uuidv4(),
-          sender: "bot",
-          content: "I'm currently in offline mode. Please check your connection to the backend service to enable AI chat functionality.",
+        // Offline mode - just add a placeholder response
+        const offlineResponse: ChatMessage = {
+          id: Date.now().toString(),
+          sender: "assistant",
+          content: "I'm currently offline. Your message has been saved locally and will be processed when connection is restored.",
           timestamp: Date.now(),
-          error: true,
+          error: true
         };
+        setMessages(prevMessages => [...prevMessages, offlineResponse]);
       }
       
-      // Add bot message to chat
-      const finalMessages = [...updatedMessages, botMessage];
-      setMessages(finalMessages);
-
-      if (currentSession) {
-        const updatedSession = { 
-          ...currentSession, 
-          messages: finalMessages, 
-          lastModified: Date.now(),
-          selectedFiles: selectedFilesList // Make sure selected files are saved
-        };
-        setCurrentSession(updatedSession);
-        
-        // Save locally always to ensure persistence
-        saveChatSession(updatedSession);
-      }
+      // Scroll to bottom after message is added
+      setTimeout(() => {
+        if (messagesContainerRef.current) {
+          messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+        }
+      }, 100);
+      
     } catch (error) {
-      console.error("Critical error in chat handling:", error);
+      console.error("Error sending message:", error);
+      
+      // Add error message to chat
       const errorMessage: ChatMessage = {
-        id: uuidv4(),
-        sender: "bot",
-        content: "A critical error occurred. Please reload the application and try again.",
+        id: Date.now().toString(),
+        sender: "assistant",
+        content: "Sorry, there was an error processing your message. Please try again.",
         timestamp: Date.now(),
-        error: true,
+        error: true
       };
-      setMessages(prev => [...prev, errorMessage]);
+      setMessages(prevMessages => [...prevMessages, errorMessage]);
+      
       toast({
-        title: "Critical Error",
-        description: "An unexpected error occurred. Please reload the application.",
-        variant: "destructive",
+        title: "Error",
+        description: "Failed to send message. Please try again.",
+        variant: "destructive"
       });
     } finally {
-      setIsLoading(false);
+      setIsWaitingForResponse(false);
     }
   };
+
+  // Process uploaded file with progress tracking
+  const processUploadedFile = useCallback(async (file: File) => {
+    try {
+      setIsSummarizing(true);
+      setUploadProgress(0);
+      setFileProcessingStep("Uploading file...");
+      
+      // Upload file with progress tracking
+      const response = await api.uploadFile(file, (progress) => {
+        setUploadProgress(progress);
+      });
+      
+      // Process document
+      setFileProcessingStep("Processing document...");
+      const result = await api.processDocument({
+        fileId: response.fileId,
+        fileName: response.fileName
+      });
+      
+      setDocumentSummary(result.summary || "Document processed successfully.");
+      
+      // Auto-add to chat if enabled
+      const uploadSettings = loadUploadSettings();
+      if (uploadSettings.autoAddToChat) {
+        handleFileSelectionChange([...selectedFilesList, response.fileName]);
+      }
+      
+      toast({
+        title: "File processed",
+        description: "Your file has been successfully processed and is ready to use."
+      });
+    } catch (error) {
+      console.error("Error processing file:", error);
+      toast({
+        title: "Processing failed",
+        description: error instanceof Error ? error.message : "Failed to process the file.",
+        variant: "destructive"
+      });
+    } finally {
+      setIsSummarizing(false);
+      setUploadProgress(100);
+    }
+  }, [api, handleFileSelectionChange, selectedFilesList, toast]);
 
   // Handle file upload
   const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -582,42 +625,123 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
   };
   
   // Remove uploaded file
-  const removeUploadedFile = useCallback(async () => {
-    if (connectionStatus === 'connected' && uploadedFile && currentSession?.documentContext?.fileId) {
-      try {
-        await api.removeFile(currentSession.documentContext.fileId);
-      } catch (error) {
-        console.error("Error removing file from backend:", error);
-      }
-    }
-    
+  const removeUploadedFile = useCallback(() => {
     setUploadedFile(null);
-    setDocumentContent(null);
     setDocumentSummary(null);
+    setFileProcessingStep("");
+    setUploadProgress(0);
+  }, []);
+
+  // If an initialChatId prop is provided, use it. Otherwise generate a new one
+  const [chatId, setChatId] = useState<string>(initialChatId || generateNewChatId());
+  
+  // First useEffect - handle initialization once on mount
+  useEffect(() => {
+    // Prevent the effect from running multiple times
+    const hasInitialized = useRef(false);
     
-    if (fileInputRef.current) fileInputRef.current.value = "";
+    if (hasInitialized.current) return;
+    hasInitialized.current = true;
     
-    if (currentSession) {
-      const updatedSession = {
-        ...currentSession,
-        documentContext: undefined,
-        lastModified: Date.now()
-      };
-      setCurrentSession(updatedSession);
-      
-      if (connectionStatus === 'connected') {
-        await api.updateChatSession(updatedSession);
-      } else {
-        saveChatSession(updatedSession);
-      }
+    // Only create a new session if no initialChatId was provided
+    if (!initialChatId && !currentSession) {
+      startNewSession();
+    } else if (initialChatId && !currentSession) {
+      // Use the provided initialChatId directly - don't depend on chatId state
+      setCurrentSession({
+        id: initialChatId,
+        name: "New Chat",
+        messages: [{
+          id: uuidv4(),
+          sender: 'assistant', // Changed from 'bot'
+          content: "Hello! How can I assist you today?",
+          timestamp: Date.now()
+        }],
+        lastModified: Date.now(),
+        selectedFiles: []
+      });
+    }
+  }, []); // Empty dependency array, runs only once on mount
+
+  // Second useEffect - handle selected files separately
+  useEffect(() => {
+    // Skip this effect on first render to avoid conflicts with other initialization
+    const isFirstRender = useRef(true);
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
     }
     
-    toast({
-      title: "File Removed",
-      description: "The document has been removed from the conversation.",
-    });
-  }, [currentSession, uploadedFile, connectionStatus, api]);
+    // Load selected files from props if available
+    if (selectedFiles?.length > 0) {
+      handleFileSelectionChange(selectedFiles);
+    }
+  }, [selectedFiles, handleFileSelectionChange]);
+  
+  // Add a function to load chat history
+  const loadChatHistory = useCallback(async (id: string) => {
+    try {
+      setIsLoading(true);
+      
+      if (!api || typeof api.getChatSessions !== 'function') {
+        console.warn('API service not fully initialized, falling back to local data');
+        // Fall back to local history
+        const localHistory = getLocalChatHistory();
+        const localSession = localHistory.find(s => s.id === id);
+        
+        if (localSession) {
+          setCurrentSession(localSession);
+          setSelectedFilesList(localSession.selectedFiles || []);
+        } else {
+          // Create new session if no matching one found
+          startNewSession();
+        }
+        return;
+      }
+      
+      // Normal API flow if the function exists
+      const sessions = await api.getChatSessions();
+      const session = sessions.find((s: any) => s.id === id);
+      
+      if (session) {
+        setCurrentSession(session);
+        setSelectedFilesList(session.selectedFiles || []);
+      } else {
+        // Fall back to local
+        const localHistory = getLocalChatHistory();
+        const localSession = localHistory.find(s => s.id === id);
+        
+        if (localSession) {
+          setCurrentSession(localSession);
+          setSelectedFilesList(localSession.selectedFiles || []);
+        } else {
+          startNewSession();
+        }
+      }
+    } catch (error) {
+      console.error("Error loading chat history:", error);
+      toast({
+        title: "Error",
+        description: "Failed to load chat history.",
+        variant: "destructive"
+      });
+      startNewSession();
+    } finally {
+      setIsLoading(false);
+    }
+  }, [handleFileSelectionChange]);
 
+  // Update first useEffect to load history if chatId exists
+  useEffect(() => {
+    if (initialChatId) {
+      // Load existing chat
+      loadChatHistory(initialChatId);
+    } else {
+      // Create new chat
+      startNewSession();
+    }
+  }, [initialChatId, loadChatHistory]);
+  
   return (
     <div className="flex flex-col h-[100vh] w-full overflow-hidden pt-3 pb-4">
       <Card className="flex flex-col h-full border-0 shadow-2xl glassmorphic animated-smoke-bg">
@@ -695,7 +819,10 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
                   <FileText size={12} />
                   <span className="font-medium text-xs truncate max-w-[150px]">{uploadedFile.name}</span>
                 </div>
-                <Button variant="ghost" size="icon" className="h-5 w-5" onClick={removeUploadedFile}>
+                <Button variant="ghost" size="icon" className="h-5 w-5" onClick={(e) => {
+                  e.preventDefault();
+                  removeUploadedFile();
+                }}>
                   <Trash2 size={12} />
                 </Button>
               </div>
@@ -857,10 +984,9 @@ export default function ChatPageClient({ selectedFiles = [] }: { selectedFiles?:
 
 interface ChatMessage {
   id: string;
-  sender: string;
+  sender: "user" | "assistant"; // Use a union type to enforce consistent values
   content: string;
   timestamp: number;
   citations?: string[];
   error?: boolean;
 }
-
