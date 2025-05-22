@@ -1,4 +1,4 @@
-# **App Name**: NebulaChat
+# **App Name**: LUNEXA - Lunar Next-gen Assistant
 
 ## Core Features:
 

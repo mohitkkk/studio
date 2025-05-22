@@ -19,8 +19,12 @@ export default function MainLayout({ children }: PropsWithChildren) {
           <SidebarTrigger className="flex-shrink-0  group-data-[collapsible=icon]:hidden mb-2" />
             <div className="flex flex-col items-center justify-center">
               {/* <Logo className="h-15 w-12" /> */}
-              
-              <span className="font-bold text-lg text-center tracking-[14px]">LUNEXA</span>
+
+                <span className="font-bold text-lg text-center tracking-[14px] bg-gradient-to-r from-[#00c853] via-[#8B5CF6] to-[#4B8FFF] bg-clip-text text-transparent animate-[gradient_8s_linear_infinite] relative before:absolute before:inset-0 before:bg-gradient-to-r before:from-[#4B8FFF] before:via-[#FF297F] before:to-[#00c853] before:bg-clip-text before:text-transparent before:animate-[gradient_8s_linear_infinite] before:content-['LUNEXA'] before:opacity-0 hover:before:opacity-100 before:transition-opacity"
+                  style={{
+                    backgroundSize: '200% auto'
+                  }}
+                >LUNEXA</span>
               <p className="text-[90%] justify-center ">Lunar Next-gen Assistant</p>
             </div>
             
@@ -63,7 +67,7 @@ export default function MainLayout({ children }: PropsWithChildren) {
           <Link href="/">
             <div className="flex items-center gap-2">
               <Logo className="h-6 w-6" />
-              <span className="font-bold">NebulaChat</span>
+              <span className="font-bold">LUNEXA</span>
             </div>
           </Link>
           <SidebarTrigger />

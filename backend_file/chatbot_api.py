@@ -9,12 +9,13 @@ import re
 import time
 import asyncio
 import uvicorn
+import uuid  # Add missing import for UUID generation
 from typing import List, Dict, Tuple, Optional, Set
 from openai import OpenAI
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body # Removed WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field # Removed WebSocketState
+from pydantic import BaseModel, Field
 from typing import Optional as PydanticOptional
 from datetime import datetime
 import hashlib
@@ -44,37 +45,36 @@ class ChatRequest(BaseModel):
     message: str
     selected_files: List[str] = []
     client_id: str = ""
-    # Optional parameters with defaults
-    ollama_model: PydanticOptional[str] = None
-    ollama_embedding_model: PydanticOptional[str] = None
-    top_k_per_file: PydanticOptional[int] = None
-    similarity_threshold: PydanticOptional[float] = None
-    temperature: PydanticOptional[float] = None
-    top_p: PydanticOptional[float] = None
-    system_prompt: PydanticOptional[str] = None
-    # Response formatting options
-    format: PydanticOptional[str] = "html"  # Added format option with default "html"
-    clean_response: PydanticOptional[bool] = None
-    remove_hedging: PydanticOptional[bool] = None
-    remove_references: PydanticOptional[bool] = None
-    remove_disclaimers: PydanticOptional[bool] = None
-    ensure_html_structure: PydanticOptional[bool] = None
-    custom_hedging_patterns: PydanticOptional[List[str]] = None
-    custom_reference_patterns: PydanticOptional[List[str]] = None
-    custom_disclaimer_patterns: PydanticOptional[List[str]] = None
-    html_tags_to_fix: PydanticOptional[List[str]] = None
-    # No information response options
-    no_info_title: PydanticOptional[str] = None
-    no_info_message: PydanticOptional[str] = None
-    include_suggestions: PydanticOptional[bool] = None
-    custom_suggestions: PydanticOptional[List[str]] = None
-    no_info_html_format: PydanticOptional[bool] = None
-
+    format: str = "html"
+    # Add parameters for customization
+    ollama_model: Optional[str] = None
+    ollama_embedding_model: Optional[str] = None
+    top_k_per_file: Optional[int] = None
+    similarity_threshold: Optional[float] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    system_prompt: Optional[str] = None
+    clean_response: Optional[bool] = None
+    remove_hedging: Optional[bool] = None
+    remove_references: Optional[bool] = None
+    remove_disclaimers: Optional[bool] = None
+    ensure_html_structure: Optional[bool] = None
+    custom_hedging_patterns: Optional[List[str]] = None
+    custom_reference_patterns: Optional[List[str]] = None
+    custom_disclaimer_patterns: Optional[List[str]] = None
+    html_tags_to_fix: Optional[List[str]] = None
+    no_info_title: Optional[str] = None
+    no_info_message: Optional[str] = None
+    include_suggestions: Optional[bool] = None
+    custom_suggestions: Optional[List[str]] = None
+    no_info_html_format: Optional[bool] = None
+    
 class ChatResponse(BaseModel):
     message: str
-    context: List[Dict] = []
-    client_id: str = ""
-    format: str = "html"  # Added format field to response
+    all_messages: Optional[List[dict]] = None
+    chat_name: Optional[str] = None
+    client_id: str
+    status: str = "success"
 
 # Define chat history structure for storage
 class ChatHistory(BaseModel):
@@ -473,6 +473,9 @@ def initialize_chat_history_directory():
 
 # Initialize the global Ollama client
 ollama_client = init_ollama_client()
+
+# Initialize CHAT_HISTORY to store in-memory chat sessions
+CHAT_HISTORY = {}
 
 # Function to read vault content
 def read_vault_content(selected_files: List[str] = None) -> Dict[str, List[str]]:
@@ -1727,6 +1730,17 @@ def generate_no_information_response(
     return response
 
 # --- Context Retrieval (using the more refined version) ---
+
+
+
+
+
+
+
+
+
+
+
 async def get_relevant_context_multifile(
     query: str,
     embeddings_by_file: Dict[str, torch.Tensor],
@@ -2184,8 +2198,10 @@ async def http_chat(request: ChatRequest):
             logger.warning(f"Empty query received from client {client_id}")
             return ChatResponse(
                 message="I need a question or input to respond to. Please provide a message.",
-                context=[],
-                client_id=client_id
+                all_messages=[],
+                chat_name=None,
+                client_id=client_id,
+                status="error"
             )
         
         # 2. Check file access and read content
@@ -2286,9 +2302,10 @@ async def http_chat(request: ChatRequest):
         # 8. Return response with updated chat_id and format
         return ChatResponse(
             message=response_text,
-            context=[],  # Context is not being returned in this version
+            all_messages=updated_history["messages"],  # Return all messages in the chat
+            chat_name=updated_history["chat_name"],  # Return the chat name
             client_id=client_id,
-            format=request.format or "html"  # Include format in response
+            status="success"
         )
 
     except Exception as e:
@@ -2298,333 +2315,359 @@ async def http_chat(request: ChatRequest):
         # Return a proper error response instead of raising exception
         return ChatResponse(
             message="Sorry, I encountered an error processing your request. Please try again.",
-            context=[],
-            client_id=client_id
+            all_messages=[],
+            chat_name=None,
+            client_id=client_id,
+            status="error"
         )
 
-# Add file selection endpoint
-@app.post("/file-selection", summary="Store file selection for a chat session")
-async def file_selection(
-    session_id: str = Body(..., embed=True),
-    selected_files: List[str] = Body(..., embed=True),
-    timestamp: Optional[float] = Body(None, embed=True)
-):
-    """
-    Records which files were selected for a particular chat session.
-    This helps the backend optimize context retrieval.
-    """
-    logger.info(f"Received file selection update for session {session_id}: {len(selected_files)} files")
-    
-    try:
-        # Update chat history with the selected files
-        history = load_chat_history(session_id)
-        if history:
-            history["selected_files"] = selected_files
-            history["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            
-            # Save the updated history
-            chat_file = os.path.join(CONFIG["chat_history_directory"], f"{session_id}.json")
-            with open(chat_file, "w", encoding="utf-8") as f:
-                json.dump(history, f, indent=2)
-                
-            logger.info(f"Updated chat history for {session_id} with {len(selected_files)} files")
-            return {"success": True, "session_id": session_id, "file_count": len(selected_files)}
-        else:
-            # Create a new chat history if one doesn't exist
-            now = time.strftime("%Y-%m-%d %H:%M:%S")
-            new_history = {
-                "chat_id": session_id,
-                "chat_name": f"Chat {now}",
-                "messages": [],
-                "selected_files": selected_files,
-                "created_at": now,
-                "updated_at": now,
-                "ai_named": False
-            }
-            
-            # Save the new history
-            os.makedirs(CONFIG["chat_history_directory"], exist_ok=True)
-            chat_file = os.path.join(CONFIG["chat_history_directory"], f"{session_id}.json")
-            with open(chat_file, "w", encoding="utf-8") as f:
-                json.dump(new_history, f, indent=2)
-                
-            logger.info(f"Created new chat history for {session_id} with {len(selected_files)} files")
-            return {"success": True, "session_id": session_id, "file_count": len(selected_files), "created": True}
-            
-    except Exception as e:
-        logger.error(f"Error updating file selection for {session_id}: {str(e)}")
-        logger.error(traceback.format_exc())
-        # Return False instead of raising an exception to prevent 500 errors
-        return False
+# Root endpoint for API status and information
+@app.get("/", summary="API Information")
+async def get_api_info():
+    return {
+        "status": "ok",
+        "version": "1.0.0",
+        "endpoints": ["/", "/chat", "/chat/{chat_id}", "/new-chat", "/file-selection", "/files"]
+    }
 
-# Add a new endpoint for explicitly creating a new chat session
-@app.post("/new-chat", summary="Create a new chat session")
+# Create new chat session
+@app.post("/new-chat", summary="Create New Chat Session")
 async def create_new_chat():
-    """
-    Creates a new chat session and returns its ID.
-    Use this when starting a new conversation.
-    """
     try:
-        # Generate a unique chat ID
-        chat_id = f"chat_{hashlib.md5(str(time.time() + random.random()).encode()).hexdigest()[:10]}"
+        # Generate a new chat ID with timestamp
+        chat_id = f"chat_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:8]}"
         
-        # Create initial chat history
-        now = time.strftime("%Y-%m-%d %H:%M:%S")
-        new_history = {
+        # Create entry in chat history storage
+        CHAT_HISTORY[chat_id] = {
             "chat_id": chat_id,
             "chat_name": "New Chat",
             "messages": [],
             "selected_files": [],
-            "created_at": now,
-            "updated_at": now,
-            "ai_named": False
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat()
         }
         
-        # Save the new chat history
-        os.makedirs(CONFIG["chat_history_directory"], exist_ok=True)
-        chat_file = os.path.join(CONFIG["chat_history_directory"], f"{chat_id}.json")
-        with open(chat_file, "w", encoding="utf-8") as f:
-            json.dump(new_history, f, indent=2)
-        
-        logger.info(f"Created new chat session with ID: {chat_id}")
-        
         return {
-            "success": True,
             "chat_id": chat_id,
             "chat_name": "New Chat",
-            "created_at": now
+            "status": "created"
         }
     except Exception as e:
         logger.error(f"Error creating new chat: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Error creating new chat: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to create new chat: {str(e)}")
 
-# Modify the existing HTTP chat endpoint to create a new session if none exists
-@app.post("/chat", summary="Process Chat Message", response_model=ChatResponse)
-async def http_chat(request: ChatRequest):
-    """
-    Handles a chat message via REST API.
-    Saves chat history and returns all messages in the response.
-    """
-    # Initialize client_id if not provided
-    client_id = request.client_id
-    if not client_id:
-        client_id = f"chat_{hashlib.md5(str(time.time() + random.random()).encode()).hexdigest()[:10]}"
-        logger.info(f"No client_id provided, created new chat: {client_id}")
-    
+# Update file selection for a chat session
+@app.post("/file-selection", summary="Update Selected Files")
+async def update_file_selection(request: dict = Body(...)):
     try:
-        # Load existing chat history
-        chat_history = load_chat_history(client_id)
-        if not chat_history:
-            # Create new chat history if it doesn't exist
-            chat_history = {
-                "chat_id": client_id,
+        session_id = request.get("session_id")
+        selected_files = request.get("selected_files", [])
+        
+        if not session_id:
+            raise HTTPException(status_code=400, detail="session_id is required")
+            
+        # Update chat session with selected files
+        if session_id in CHAT_HISTORY:
+            CHAT_HISTORY[session_id]["selected_files"] = selected_files
+            CHAT_HISTORY[session_id]["updated_at"] = datetime.now().isoformat()
+            
+            return {
+                "status": "updated",
+                "chat_id": session_id,
+                "selected_files": selected_files
+            }
+        else:
+            # Create new session if it doesn't exist
+            CHAT_HISTORY[session_id] = {
+                "chat_id": session_id,
                 "chat_name": "New Chat",
                 "messages": [],
-                "selected_files": [],
+                "selected_files": selected_files,
                 "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat(),
-                "ai_named": False
+                "updated_at": datetime.now().isoformat()
             }
-        
-        # Add user message to history
-        from uuid import uuid4  # Add missing import
-        
-        user_message = {
-            "id": str(uuid4()),
-            "role": "user",
-            "content": request.message,
-            "timestamp": datetime.now().isoformat()
-        }
-        chat_history["messages"].append(user_message)
-        
-        # Save history with user message
-        save_chat_history(client_id, chat_history["chat_name"], user_message, request.selected_files)
-        
-        # Process the message using ollama_chat_multifile_async
-        # Read files content and generate embeddings
-        files_with_content = read_vault_content(request.selected_files)
-        embeddings_by_file = await generate_vault_embeddings(files_with_content)
-        
-        # Generate response from LLM
-        response_text = await ollama_chat_multifile_async(
-            user_input=request.message,
-            selected_files=request.selected_files,
-            embeddings_by_file=embeddings_by_file,
-            content_by_file=files_with_content,
-            client_id=client_id,
-            format=request.format or "html"  # Pass format parameter
-        )
-        
-        # Add AI response to history
-        ai_message = {
-            "id": str(uuid4()),
-            "role": "assistant",
-            "content": response_text,
-            "timestamp": datetime.now().isoformat()
-        }
-        chat_history["messages"].append(ai_message)
-        
-        # Update selected files if provided
-        if request.selected_files:
-            chat_history["selected_files"] = request.selected_files
             
-        # Try to generate a better chat name if this is the first user message and AI hasn't named it yet
-        if len(chat_history["messages"]) <= 2 and not chat_history["ai_named"]:
-            try:
-                # Generate a descriptive name based on the user's first message
-                chat_name = generate_chat_name(request.message)
-                chat_history["chat_name"] = chat_name
-                chat_history["ai_named"] = True
-            except Exception as e:
-                logger.error(f"Error generating chat name: {str(e)}")
-                # Keep default name if generation fails
-                
-        # Save updated history with AI response
-        save_chat_history(client_id, chat_history)
-        
-        # Return response with ALL messages
-        return ChatResponse(
-            message=response_text,
-            context=[],
-            client_id=client_id,
-            all_messages=chat_history["messages"],
-            chat_name=chat_history["chat_name"]
-        )
+            return {
+                "status": "created",
+                "chat_id": session_id,
+                "selected_files": selected_files
+            }
     except Exception as e:
-        logger.error(f"Error processing chat message: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Error processing chat: {str(e)}")
+        logger.error(f"Error updating file selection: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update file selection: {str(e)}")
 
-# Add an endpoint to get chat history
+# File upload endpoint
+@app.post("/upload", summary="Upload a file")
+async def upload_file(file: UploadFile = File(...)):
+    try:
+        # Create a safe filename with timestamp prefix
+        timestamp = int(datetime.now().timestamp())
+        safe_filename = f"{timestamp}_{file.filename.replace(' ', '_')}"
+        
+        # Define the path to save the file
+        file_path = os.path.join(CONFIG["vault_directory"], safe_filename)
+        
+        # Ensure vault directory exists
+        os.makedirs(CONFIG["vault_directory"], exist_ok=True)
+        
+        # Save the uploaded file
+        with open(file_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+        
+        # Add file metadata to the vault index
+        file_metadata = {
+            "filename": safe_filename,
+            "original_name": file.filename,
+            "description": f"Uploaded on {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            "added_date": datetime.now().isoformat(),
+            "tags": ["uploaded"],
+            "size": len(content),
+            "content_type": file.content_type
+        }
+        
+        # Update vault metadata
+        add_file_to_vault(
+            safe_filename,
+            file_metadata["description"],
+            file_metadata["tags"]
+        )
+        
+        return {
+            "filename": safe_filename,
+            "size": len(content),
+            "status": "uploaded",
+            "message": f"File {file.filename} uploaded successfully as {safe_filename}"
+        }
+    
+    except Exception as e:
+        logger.error(f"Error uploading file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
+
+# Process document endpoint
+@app.post("/process", summary="Process an uploaded document")
+async def process_document(request: dict = Body(...)):
+    try:
+        filename = request.get("filename")
+        if not filename:
+            raise HTTPException(status_code=400, detail="Filename is required")
+        
+        file_path = os.path.join(CONFIG["vault_directory"], filename)
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail=f"File {filename} not found")
+        
+        # Extract text from file based on type
+        file_text = ""
+        if filename.endswith(".pdf"):
+            # Process PDF file
+            file_text = extract_text_from_pdf(file_path)
+        elif filename.endswith((".txt", ".md")):
+            # Process plain text
+            with open(file_path, "r", encoding="utf-8") as f:
+                file_text = f.read()
+        elif filename.endswith((".docx")):
+            # Process Word document
+            file_text = extract_text_from_docx(file_path)
+        else:
+            # Default text extraction
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                file_text = f.read()
+        
+        # Generate summary using the model
+        summary = await generate_ai_summary(file_text)
+        
+        # Update file metadata with summary
+        update_file_metadata(
+            filename=filename,
+            description=f"AUTO-SUMMARY: {summary[:200]}...",
+            tags=["processed", "auto-summarized"]
+        )
+        
+        return {
+            "filename": filename,
+            "summary": summary,
+            "status": "processed",
+            "message": f"File {filename} processed successfully"
+        }
+    
+    except Exception as e:
+        logger.error(f"Error processing document: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process document: {str(e)}")
+
+# Helper function to extract text from PDF
+def extract_text_from_pdf(file_path):
+    try:
+        if not PdfReader:
+            logger.error("PDF processing requires 'pypdf'. Please install it.")
+            return "Error: PDF processing module not available"
+            
+        reader = PdfReader(file_path)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
+        return text
+    except Exception as e:
+        logger.error(f"Error extracting PDF text: {str(e)}")
+        return f"Error extracting text: {str(e)}"
+
+# Helper function to extract text from DOCX
+def extract_text_from_docx(file_path):
+    try:
+        # Try to import docx library
+        try:
+            import docx
+        except ImportError:
+            logger.error("DOCX processing requires 'python-docx'. Please install it.")
+            return "Error: DOCX processing module not available"
+        
+        doc = docx.Document(file_path)
+        text = ""
+        for para in doc.paragraphs:
+            text += para.text + "\n"
+        return text
+    except Exception as e:
+        logger.error(f"Error extracting DOCX text: {str(e)}")
+        return f"Error extracting text: {str(e)}"
+
+# Helper function to generate summary using AI
+async def generate_ai_summary(text):
+    try:
+        if not ollama_client:
+            logger.error("Ollama client not available for summary generation")
+            return "Summary generation failed. Ollama client not available."
+            
+        # Limit text to reasonable size
+        text = text[:8000]  # First 8K chars
+        
+        # Create prompt for summary
+        prompt = f"""Generate a concise summary of the following document content in 2-3 sentences.
+        
+Content:
+{text}
+
+Summary:"""
+        
+        # Call Ollama API
+        response = await asyncio.to_thread(
+            lambda: ollama.chat.completions.create(
+                model=CONFIG["ollama_model"],
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3  # Lower temperature for factual summary
+            )
+        )
+        
+        # Extract summary from response
+        summary = response.choices[0].message.content.strip()
+        return summary
+    except Exception as e:
+        logger.error(f"Error generating summary: {str(e)}")
+        logger.error(traceback.format_exc())
+        return "Summary generation failed. The document was processed but no summary is available."
+
 @app.get("/chat/{chat_id}", summary="Get Chat History")
 async def get_chat_history(chat_id: str):
-    """Retrieves chat history for a specific chat ID."""
     try:
-        history = load_chat_history(chat_id)
-        return history
-    except Exception as e:
-        logger.error(f"Error retrieving chat history for {chat_id}: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Error retrieving chat history: {str(e)}")
-
-# Simple function to generate a chat name from the first message
-def generate_chat_name(message):
-    """Generate a short descriptive name for the chat based on the first message."""
-    try:
-        # Limit to 40 chars and remove any problematic characters
-        name = message.strip()
-        if len(name) > 40:
-            name = name[:37] + "..."
-        return name
-    except:
-        return "New Chat"
-
-# Initialize necessary directories and clients at startup
-def initialize_application():
-    """Performs all necessary initialization at application startup."""
-    logger.info("Initializing application...")
-    
-    # Check dependencies first
-    dependency_status = check_dependencies()
-    if not all(dependency_status.values()):
-        logger.warning("Some dependencies are missing, functionality may be limited.")
-        print("⚠️ Some dependencies are missing. See log for details.")
-    
-    # Initialize directories
-    initialize_vault_directory()
-    initialize_chat_history_directory()
-    
-    # Verify Ollama client and model availability
-    global ollama_client
-    if ollama_client is None:
-        logger.critical("Failed to initialize Ollama client. API endpoints requiring LLM will fail.")
-        print("❌ Critical: Failed to initialize Ollama client")
-
-    # Log initialization completion
-    logger.info("Application initialization complete.")
-    return True
-
-# Add route handlers for common URLs that are returning 404s
-@app.get("/", summary="API Information")
-async def root():
-    """Returns basic information about the API."""
-    return {
-        "name": "Document Chatbot API",
-        "version": "1.0",
-        "status": "running",
-        "endpoints": [
-            {"path": "/chat", "method": "POST", "description": "Process chat message"},
-            {"path": "/files", "method": "GET", "description": "Get list of available files"},
-            {"path": "/upload", "method": "POST", "description": "Upload file to vault"},
-        ]
-    }
-
-@app.get("/favicon.ico", include_in_schema=False)
-async def favicon():
-    """Handle favicon requests to prevent 404 errors."""
-    return JSONResponse(status_code=204, content={})  # No content response
-
-# Add endpoint to get list of files
-@app.get("/files", summary="Get Available Files")
-async def get_files(tag: str = None):
-    """
-    Returns the list of available files in the vault.
-    
-    Parameters:
-    - tag: Optional filter to get files with a specific tag
-    """
-    try:
-        # Get all files from the vault
-        files = get_vault_files()
+        # Check if we should return all chats
+        if chat_id == "all":
+            # Get all files in chat history directory
+            all_chats = []
+            chat_dir = CONFIG["chat_history_directory"]
+            
+            if os.path.exists(chat_dir):
+                for filename in os.listdir(chat_dir):
+                    if filename.endswith('.json'):
+                        try:
+                            chat_id = filename.replace('.json', '')
+                            chat_data = load_chat_history(chat_id)
+                            if chat_data:
+                                # Create a summary object with essential info
+                                messages = chat_data.get("messages", [])
+                                last_message = ""
+                                if messages:
+                                    last_message = messages[-1].get("content", "")
+                                    if len(last_message) > 100:
+                                        last_message = last_message[:100] + "..."
+                                        
+                                all_chats.append({
+                                    "chat_id": chat_id,
+                                    "chat_name": chat_data.get("chat_name", "Untitled Chat"),
+                                    "last_message": last_message,
+                                    "message_count": len(messages),
+                                    "updated_at": chat_data.get("updated_at", ""),
+                                    "selected_files": chat_data.get("selected_files", [])
+                                })
+                        except Exception as e:
+                            logger.error(f"Error reading chat file {filename}: {str(e)}")
+                            
+            # Sort by updated_at (newest first)
+            all_chats.sort(key=lambda x: x.get("updated_at", "1970-01-01 00:00:00"), reverse=True)
+            return all_chats
         
-        if not files:
-            return {"files": [], "count": 0, "message": "No files found in vault"}
+        # Otherwise load specific chat history
+        chat_data = load_chat_history(chat_id)
+        if not chat_data:
+            raise HTTPException(status_code=404, detail=f"Chat {chat_id} not found")
+        
+        return chat_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving chat history: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve chat history: {str(e)}")
+
+@app.get("/files", summary="Get Available Files")
+async def get_files(tag: Optional[str] = None):
+    """Returns a list of available files in the vault, with optional tag filtering."""
+    try:
+        # Get all vault files from metadata
+        all_files = get_vault_files()
         
         # Filter by tag if provided
         if tag:
             tag = tag.lower().strip()
-            filtered_files = []
-            for file in files:
-                if "tags" in file and tag in [t.lower() for t in file.get("tags", [])]:
-                    filtered_files.append(file)
-            files = filtered_files
-            
-        # Format the response
-        result = []
-        for file in files:
-            # Extract relevant fields and ensure they exist
-            file_info = {
-                "filename": file.get("filename", ""),
-                "description": file.get("description", "No description"),
-                "tags": file.get("tags", []),
-                "added_date": file.get("added_date", ""),
-                "updated_date": file.get("updated_date", ""),
+            filtered_files = [
+                file for file in all_files 
+                if "tags" in file and tag in [t.lower() for t in file["tags"]]
+            ]
+            return {
+                "files": filtered_files,
+                "count": len(filtered_files),
+                "filtered_by_tag": tag
             }
-            
-            # Add suggested questions if available
-            if "suggested_questions" in file and file["suggested_questions"]:
-                file_info["suggested_questions"] = file["suggested_questions"]
-                
-            result.append(file_info)
-            
-        return {
-            "files": result,
-            "count": len(result),
-            "filtered_by_tag": tag if tag else None
-        }
         
+        # Return all files if no tag filter
+        return {
+            "files": all_files,
+            "count": len(all_files)
+        }
     except Exception as e:
         logger.error(f"Error retrieving files: {str(e)}")
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Error retrieving files: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve files: {str(e)}")
 
-# Run initialization
-initialize_application()
-
-# Start server using uvicorn
+# Add main block to start the server when script is run directly
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    logger.info(f"Starting API server on port {port}")
-    uvicorn.run(app, host="0.0.0.0", port=port)
-    logger.info("API server started successfully.")
+    # Initialize required directories
+    initialize_vault_directory()
+    initialize_chat_history_directory()
+    
+    # Check dependencies
+    dependency_status = check_dependencies()
+    
+    # Get server configuration
+    host = SERVER_CONFIG.get("host", "0.0.0.0")
+    port = SERVER_CONFIG.get("port", 3000)
+    reload_enabled = SERVER_CONFIG.get("reload", False)
+    
+    print(f"\nStarting FastAPI server on http://{host}:{port}")
+    print("Press Ctrl+C to stop the server")
+    
+    # Start the server with uvicorn
+    uvicorn.run(
+        app,                # Pass app instance directly
+        host=host,          # Listen on all network interfaces by default
+        port=port,          # Use configured port
+        reload=reload_enabled  # Auto-reload during development if configured
+    )

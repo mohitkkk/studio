@@ -7,7 +7,7 @@ import { Toaster } from '@/components/ui/toaster';
 import MainLayout from '@/components/layout/main-layout';
 
 export const metadata: Metadata = {
-  title: 'NebulaChat',
+  title: 'LUNEXA - Lunar Next-gen Assistant',
   description: 'Futuristic AI Chat Application',
 };
 

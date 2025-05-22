@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
-import { FileText, XCircle, Filter, FolderOpen, RefreshCw, AlertCircle } from "lucide-react";
+import { FileText, XCircle, Filter, FolderOpen, RefreshCw, AlertCircle, Search, X } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
@@ -177,185 +177,139 @@ export default function FileSelector({ selectedFiles, onSelectionChange, onClose
     return filename.replace(/^\d+_/, '');
   };
 
+  const toggleFile = useCallback((filename: string) => {
+    setSelectedFileIds(prevSelection => {
+      const updatedSelection = new Set(prevSelection);
+      
+      if (updatedSelection.has(filename)) {
+        updatedSelection.delete(filename);
+      } else {
+        updatedSelection.add(filename);
+      }
+      
+      // Notify parent component about the change
+      onSelectionChange(Array.from(updatedSelection));
+      
+      return updatedSelection;
+    });
+  }, [onSelectionChange]);
+
   return (
-    <Card className="w-full max-w-[600px] max-h-[80vh] overflow-hidden flex flex-col">
-      <CardHeader className="p-3 pb-0">
-        <div className="flex justify-between items-center">
-          <CardTitle className="text-lg">Select Files</CardTitle>
-          <Button variant="ghost" size="icon" onClick={onClose} className="h-8 w-8">
-            <XCircle className="h-4 w-4" />
-          </Button>
-        </div>
-        <div className="flex items-center gap-2 mt-2">
-          <Input 
-            placeholder="Search files..." 
+    <div className="flex flex-col h-full">
+      <div className="p-4 border-b">
+        <div className="relative">
+          <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
+          <Input
+            placeholder="Search files..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="flex-1"
+            className="pl-8"
           />
         </div>
         
-        {/* Tags filter - only show if we have tags */}
-        {allTags.length > 0 && (
-          <HorizontalScroll className="whitespace-nowrap overflow-x-auto scrollbar-hide">
-            <div className="flex gap-2">
-              <Badge 
-                variant={activeTag === null ? "default" : "outline"}
-                className="cursor-pointer"
-                onClick={() => setActiveTag(null)}
-              >
-                All Files
-              </Badge>
-              {allTags.map(tag => (
-                <Badge 
-                  key={tag} 
-                  variant={activeTag === tag ? "default" : "outline"}
-                  className="cursor-pointer"
-                  onClick={() => setActiveTag(tag === activeTag ? null : tag)}
-                >
-                  {tag}
+        {selectedFiles.length > 0 && (
+          <div className="flex flex-wrap gap-1 mt-3">
+            <div className="mr-2 text-sm text-muted-foreground">Selected:</div>
+            {selectedFiles.map(file => {
+              // Get display name (remove timestamp prefix if present)
+              const displayName = file.split('_').slice(1).join('_') || file;
+              const toggleFile = useCallback((file: string) => {
+                // Create a new array without the file we want to remove
+                const updatedSelection = selectedFiles.filter(f => f !== file);
+                
+                // Update the internal state
+                setSelectedFileIds(new Set(updatedSelection));
+                
+                // Call the callback with the updated array
+                onSelectionChange(updatedSelection);
+              }, [selectedFiles, onSelectionChange]);
+
+              return (
+                <Badge key={file} variant="secondary" className="flex items-center gap-1">
+                  {displayName}
+                  <button 
+                    onClick={() => toggleFile(file)} 
+                    className="ml-1 rounded-full hover:bg-muted"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
                 </Badge>
-              ))}
-            </div>
-          </HorizontalScroll>
-        )}
-      </CardHeader>
-      <CardContent className="p-3 flex-1 overflow-hidden">
-        {isLoading ? (
-          <div className="flex flex-col justify-center items-center h-[200px] gap-4">
-            <LoadingSpinner size="lg" />
-            <p className="text-sm text-muted-foreground animate-pulse">Loading files...</p>
+              );
+            })}
           </div>
-        ) : apiError ? (
-          <div className="flex flex-col items-center justify-center h-[200px] p-4">
-            <Alert variant="destructive" className="mb-4">
-              <AlertCircle className="h-4 w-4" />
-              <AlertTitle>Error Loading Files</AlertTitle>
-              <AlertDescription>{apiError}</AlertDescription>
-            </Alert>
-            
-            <Button 
-              onClick={handleRetry}
-              variant="outline"
-              size="sm"
-              className="mt-2 flex items-center gap-2"
-            >
-              <RefreshCw className="h-4 w-4 mr-1" />
-              Retry
-            </Button>
-            
-            <p className="text-xs text-muted-foreground mt-4 text-center">
-              Make sure the backend server is running at:<br />
-              <code className="bg-muted px-1 py-0.5 rounded text-xs">
-                {process.env.NEXT_PUBLIC_API_URL || 'http://13.202.208.115:3000'}
-              </code>
-            </p>
+        )}
+      </div>
+      
+      <ScrollArea className="flex-1">
+        {isLoading ? (
+          <div className="flex justify-center items-center p-8">
+            <div className="loading loading-spinner"></div>
           </div>
         ) : filteredFiles.length === 0 ? (
-          <div className="text-center p-8 text-muted-foreground h-[200px] flex flex-col items-center justify-center">
-            {hasFilteredFiles ? (
-              <>
-                <p className="mb-2">No files match your search criteria</p>
-                <Button 
-                  variant="ghost" 
-                  size="sm" 
-                  onClick={() => {
-                    setSearchTerm('');
-                    setActiveTag(null);
-                  }}
-                >
-                  Clear Filters
-                </Button>
-              </>
-            ) : files.length > 0 ? (
-              <p>No files match the selected filter</p>
-            ) : (
-              <div className="flex flex-col items-center gap-2">
-                <p>No files available</p>
-                <p className="text-xs">You can upload files to get started</p>
-                <Button 
-                  size="sm" 
-                  variant="outline" 
-                  onClick={() => window.open('/upload', '_blank')}
-                  className="mt-2"
-                >
-                  Upload Files
-                </Button>
-              </div>
+          <div className="flex flex-col items-center justify-center p-8 text-center">
+            <p className="text-muted-foreground">No files found</p>
+            {searchTerm && (
+              <Button 
+                variant="link" 
+                onClick={() => setSearchTerm("")}
+                className="mt-2"
+              >
+                Clear search
+              </Button>
             )}
           </div>
         ) : (
-          <ScrollArea className="h-[300px] pr-2">
-            <div className="space-y-2">
-              {filteredFiles.map((file, index) => (
-                <div 
-                  key={`${file.filename}-${index}`}
-                  className={`flex items-start p-2 rounded-md hover:bg-accent/30 transition-colors ${
-                    selectedFileIds.has(file.filename) ? "bg-accent/50" : ""
-                  }`}
-                >
-                  <Checkbox
-                    checked={selectedFileIds.has(file.filename)}
-                    onCheckedChange={() => toggleFileSelection(file.filename)}
-                    className="mr-2 mt-1"
-                  />
-                  <div 
-                    className="flex-1 min-w-0 cursor-pointer" 
-                    onClick={() => toggleFileSelection(file.filename)}
-                  >
-                    <div className="flex items-center">
-                      <FileText className="h-4 w-4 mr-2 text-muted-foreground" />
-                      <span className="font-medium text-sm truncate">
-                        {cleanFilename(file.filename)}
-                      </span>
+          <div className="divide-y">
+            {filteredFiles.map(file => (
+              <div
+                key={file.filename}
+                className={`p-3 cursor-pointer transition-colors ${
+                  selectedFiles.includes(file.filename) 
+                    ? "bg-primary/10 hover:bg-primary/15" 
+                    : "hover:bg-muted/60"
+                }`}
+                onClick={() => toggleFile(file.filename)}
+              >
+                <div className="flex items-start">
+                  <FileText className="h-5 w-5 mt-0.5 flex-shrink-0 text-muted-foreground" />
+                  <div className="ml-3 flex-1 min-w-0">
+                    <div className="font-medium truncate">
+                      {file.filename.split('_').slice(1).join('_') || file.filename}
                     </div>
                     {file.description && (
-                      <p className="text-xs text-muted-foreground truncate mt-1">
-                        {file.description.replace(/^AUTO-SUMMARY: \*\*/g, '').replace(/\*\*/g, '').substring(0, 100)}
-                        {file.description.length > 100 ? '...' : ''}
+                      <p className="text-sm text-muted-foreground line-clamp-2 mt-0.5">
+                        {file.description}
                       </p>
                     )}
                     {file.tags && file.tags.length > 0 && (
-                      <div className="flex gap-1 mt-1 flex-wrap">
-                        {file.tags.slice(0, 3).map((tag, i) => (
-                          <Badge key={`${file.filename}-tag-${i}`} variant="outline" className="text-[10px] py-0 px-1">
+                      <div className="flex flex-wrap gap-1 mt-2">
+                        {file.tags.slice(0, 3).map((tag: string) => (
+                          <Badge key={tag} variant="outline" className="text-xs">
                             {tag}
                           </Badge>
                         ))}
                         {file.tags.length > 3 && (
-                          <Badge variant="outline" className="text-[10px] py-0 px-1">
-                            +{file.tags.length - 3} more
+                          <Badge variant="outline" className="text-xs">
+                            +{file.tags.length - 3}
                           </Badge>
                         )}
                       </div>
                     )}
-                    <p className="text-[10px] text-muted-foreground/80 mt-1">
-                      Added: {new Date(file.added_date).toLocaleDateString()}
-                    </p>
                   </div>
                 </div>
-              ))}
-            </div>
-          </ScrollArea>
+              </div>
+            ))}
+          </div>
         )}
-      </CardContent>
-      <CardFooter className="p-3 pt-1 border-t border-gray-700 flex justify-between">
-        <div className="text-sm">
-          {selectedFileIds.size} file{selectedFileIds.size !== 1 ? 's' : ''} selected
-        </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={() => setSelectedFileIds(new Set())}>
-            Clear
-          </Button>
-          <Button 
-            size="sm" 
-            onClick={handleApply} 
-            disabled={isLoading}
-          >
-            Apply Selection
+      </ScrollArea>
+      
+      {onClose && (
+        <div className="p-4 border-t">
+          <Button onClick={onClose} className="w-full">
+            Done
           </Button>
         </div>
-      </CardFooter>
-    </Card>
+      )}
+    </div>
   );
 }

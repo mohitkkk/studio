@@ -10,9 +10,14 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
 import { Settings2, PlusCircle, Trash2, Save, RotateCcw } from "lucide-react";
 import LoadingSpinner from "@/components/ui/loading-spinner";
-import type { EnvVariable } from "@/types";
 import { useToast } from "@/hooks/use-toast";
 import { v4 as uuidv4 } from 'uuid';
+
+interface EnvVariable {
+  id: string;
+  key: string;
+  value: string;
+}
 
 const ENV_CONFIG_KEY = "nebulaChatEnvConfig";
 

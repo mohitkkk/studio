@@ -50,8 +50,10 @@ export default function SidebarNav() {
 						key={index}
 						href={item.href}
 						className={cn(
-							'flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors hover:bg-accent/50',
-							pathname === item.href ? 'bg-accent text-accent-foreground' : 'text-muted-foreground'
+							'flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors',
+							pathname === item.href 
+								? 'bg-gradient-to-l from-[#FF297F] to-[#4B8FFF] text-white' 
+								: 'text-muted-foreground hover:bg-gradient-to-l hover:from-[#FF297F] hover:to-[#4B8FFF] hover:opacity-70 hover:text-white'
 						)}
 					>
 						<div className="flex items-center gap-3 w-full">

@@ -328,10 +328,7 @@ const SidebarInset = React.forwardRef<
       ref={ref}
       className={cn(
         "relative flex min-h-screen overflow-y-hidden flex-col bg-background md:m-2 md:my-2 md:rounded-xl md:shadow-lg",
-        // The following peer classes are specific to inset variant, we keep them for that case,
-        // but the general floating style is now applied above.
         "peer-data-[variant=inset]:min-h-[calc(100svh-theme(spacing.4))]",
-        // Original inset styles: "peer-data-[variant=inset]:min-h-[calc(100svh-theme(spacing.4))] md:peer-data-[variant=inset]:m-2 md:peer-data-[variant=inset]:ml-0 md:peer-data-[variant=inset]:rounded-xl md:peer-data-[variant=inset]:shadow",
         className
       )}
       {...props}

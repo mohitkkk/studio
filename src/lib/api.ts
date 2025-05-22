@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { ApiServiceType } from '@/hooks/use-api-service';
 
 // Configure axios with longer timeout
 const axiosInstance = axios.create({
@@ -13,37 +14,19 @@ const axiosInstance = axios.create({
 const apiCache = new Map();
 
 // Define types for the API
-interface ChatData {
-    // ChatData structure - adjust properties based on actual data structure
-    id: string;
-    title?: string;
-    messages?: any[];
-    createdAt?: string;
-    updatedAt?: string;
-    [key: string]: any; // For other properties that might exist
-}
-
-// File metadata interface
-interface FileMetadata {
-    filename: string;
-    description?: string;
-    tags?: string[];
-    added_date?: string;
-    updated_date?: string;
-    suggested_questions?: Array<{question: string}>;
-    [key: string]: any;
-}
-
-type CacheKey = string;
+export type CacheKey = 'chatHistory' | 'files' | 'all';
+export interface ChatData { id: string; title: string; messages: any[]; lastUpdated: string; }
+export interface FileMetadata { filename: string; description: string; tags: string[]; }
 
 // Track ongoing requests to prevent duplicate calls
 const pendingRequests = new Map<string, Promise<any>>();
 
+// Expanded API interface to include missing methods
 export const api = {
     // Add a checkStatus method
     checkStatus: async (): Promise<{ status: string; version: string }> => {
         try {
-            const response = await axiosInstance.get('/status');
+            const response = await axiosInstance.get('/files');
             return response.data;
         } catch (error) {
             console.error('Error checking API status:', error);
@@ -147,9 +130,6 @@ export const api = {
         }
     },
     
-    // Other API methods with improved error handling
-    // ...existing code...
-    
     // Method to clear cache when needed (e.g., after mutations)
     clearCache: (key?: CacheKey): void => {
         if (key) {
@@ -159,8 +139,63 @@ export const api = {
             apiCache.clear();
             pendingRequests.clear();
         }
+    },
+    
+    // Add the critical missing methods
+    createNewChat: async () => {
+      try {
+        const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://13.202.208.115:3000';
+        const response = await fetch(`${baseUrl}/new-chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        });
+        if (!response.ok) throw new Error(`API responded with ${response.status}`);
+        
+        return await response.json();
+      } catch (error) {
+        console.error('Error creating new chat:', error);
+        return { chat_id: `chat_${Date.now()}`, status: 'local' };
+      }
+    },
+    
+    sendChatMessage: async (data: any) => {
+      try {
+        const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://13.202.208.115:3000';
+        const response = await fetch(`${baseUrl}/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: data.message,
+            selected_files: data.selected_files,
+            client_id: data.sessionId,
+            format: data.format || "html"
+          })
+        });
+        
+        if (!response.ok) throw new Error(`API responded with ${response.status}`);
+        return await response.json();
+      } catch (error) {
+        console.error('Error sending chat message:', error);
+        return { 
+          message: 'Failed to send message. Please try again.',
+          client_id: data.sessionId,
+          status: 'error'
+        };
+      }
     }
 };
+
+// Initialize the API integration
+export function initializeApiIntegration(apiService: ApiServiceType): void {
+  // Attach the API service methods to the api object
+  Object.entries(apiService).forEach(([key, method]) => {
+    if (typeof method === 'function' && !api[key as keyof typeof api]) {
+      (api as any)[key] = method;
+    }
+  });
+  
+  console.log('API integration initialized with methods:', Object.keys(api));
+}
 
 // Export types for use in other modules
 export type { ChatData, FileMetadata, CacheKey };

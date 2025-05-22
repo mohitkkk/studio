@@ -134,7 +134,7 @@ export function ChatMessage({ content, isUser = false, format = 'html', timestam
       <div className="flex-1 space-y-2">
         <div className="flex items-center justify-between">
           <span className="text-sm font-medium">
-            {isUser ? 'You' : 'NebulaChat'}
+            {isUser ? 'You' : 'LUNEXA Assistant'}
           </span>
           {timestamp && (
             <span className="text-xs text-muted-foreground">

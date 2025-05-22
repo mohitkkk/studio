@@ -1,4 +1,3 @@
-
 'use client'
 import { useCallback, useEffect, useRef, useState, FormEvent } from "react";
 import type { ChangeEvent } from 'react';
@@ -7,19 +6,31 @@ import { Input } from "@/components/ui/input";
 import { Card, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Paperclip, Send, FileText, Trash2, FolderOpen, XCircle } from "lucide-react";
 import LoadingSpinner from "@/components/ui/loading-spinner";
-import type { ChatSession } from "@/types";
+import type { ChatSession, ChatMessage as ImportedChatMessage } from "@/types";
 import { useToast } from "@/hooks/use-toast";
 import { v4 as uuidv4 } from 'uuid';
 import { useConnectionStatus } from "@/hooks/use-connection-status";
-import { api, useApiService } from "@/hooks/use-api-service";
+import { useApiService } from "@/hooks/use-api-service";
 import FileSelector from "./file-selector"; 
-import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { VisuallyHidden } from "@/components/ui/visually-hidden";
 import { applySettingsToRequest } from "@/lib/settings";
 
 // Import settings functions
 import { loadUploadSettings, getChatRequestSettings } from "@/lib/settings-api";
+import { setGlobalApiService } from "@/lib/api-service-utils";
+// Remove unused import
+
+// Define ChatMessage interface
+interface ChatMessage {
+  id: string;
+  sender: "user" | "assistant";
+  content: string;
+  timestamp: number;
+  citations?: string[];
+  error?: boolean;
+}
 
 // Mock function for saving/loading chat history from localStorage
 const CHAT_HISTORY_KEY = "nebulaChatHistory";
@@ -51,6 +62,11 @@ const getLocalChatHistory = (): ChatSession[] => {
   }
 };
 
+// Generate a new chat ID
+const generateNewChatId = () => {
+  return `chat_${Math.random().toString(36).substring(2, 10)}_${Date.now()}`;
+};
+
 export default function ChatPageClient({ 
   selectedFiles = [], 
   initialChatId = "" 
@@ -58,8 +74,10 @@ export default function ChatPageClient({
   selectedFiles?: string[],
   initialChatId?: string
 }) {
-  // Initialize API service
-  const serviceApi = useApiService(); // Renamed to avoid conflict with imported api
+  // FIXED: Call hooks at the top level in the same order every time
+  const serviceApiInstance = useApiService();
+  // Ensure all required methods exist when setting initial state
+  const [serviceApi, setServiceApi] = useState(serviceApiInstance);
   
   // State variables
   const [currentSession, setCurrentSession] = useState<ChatSession | null>(null);
@@ -71,6 +89,7 @@ export default function ChatPageClient({
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected' | 'connecting'>('connecting');
   const [backendVersion, setBackendVersion] = useState<string | null>(null);
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
+  const [chatId, setChatId] = useState<string>(initialChatId || generateNewChatId());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
@@ -79,65 +98,142 @@ export default function ChatPageClient({
   const [fileProcessingStep, setFileProcessingStep] = useState("");
   const [documentSummary, setDocumentSummary] = useState<string | null>(null);
   const [selectedFilesList, setSelectedFilesList] = useState<string[]>(selectedFiles);
+  const [availableFiles, setAvailableFiles] = useState<any[]>([]);
+  const [isLoadingFiles, setIsLoadingFiles] = useState(false);
   const { toast } = useToast();
   
+  // Remove uploaded file (missing function)
+  const removeUploadedFile = useCallback(() => {
+    setUploadedFile(null);
+    setDocumentSummary(null);
+    setFileProcessingStep("");
+    setUploadProgress(0);
+  }, []);
+
   // Check backend connection on component mount - with throttling
   useEffect(() => {
     let isMounted = true;
     let connectionCheckTimeout: NodeJS.Timeout | null = null;
+    let retryCount = 0;
+    const maxRetries = 3;
     
     const checkConnection = async () => {
       if (!isMounted) return;
-
-      if (!serviceApi || typeof serviceApi.getChatSessions !== 'function') {
-        console.warn("API service not ready in checkConnection. Retrying soon.");
-        if (isMounted) {
-            connectionCheckTimeout = setTimeout(checkConnection, 1000); // Retry after 1 sec
-        }
+      
+      console.log("Checking connection with serviceApi:", serviceApi);
+      
+      if (!serviceApi) {
+        console.warn("API service is null or undefined. Retrying soon.");
+        connectionCheckTimeout = setTimeout(checkConnection, 1000);
         return;
       }
       
+      // More robust check for critical methods
+      const hasSendChatMessage = typeof serviceApi.sendChatMessage === 'function';
+      const hasGetFiles = typeof serviceApi.getFiles === 'function';
+      
+      // If sendChatMessage is missing but we're logging the method list
+      if (!hasSendChatMessage) {
+        console.error(`Critical API method sendChatMessage is missing. Methods available:`, Object.keys(serviceApi));
+        
+        // Create a completely new service with guaranteed methods rather than trying to patch
+        // Don't reuse the existing serviceApi since its structure might be corrupt
+        const fallbackApi = {
+          checkStatus: async () => ({ status: 'error', message: 'Not implemented' }),
+          getFiles: async () => ({ files: [], count: 0 }),
+          getChatHistory: async () => ({ messages: [] }),
+          createChatSession: async () => ({ chat_id: `fallback_${Date.now()}` }),
+          sendChatMessage: async (params: any) => {
+            console.warn("Using emergency fallback sendChatMessage implementation");
+            return { 
+              message: "Sorry, the chat service is currently unavailable. Please try again later.",
+              status: "error",
+              client_id: params.sessionId || "fallback"
+            };
+          },
+          updateFileSelection: async () => ({ status: 'error' }),
+          clearCache: async () => ({ success: false }),
+          uploadFile: async () => ({ 
+            fileId: 'error', 
+            fileName: 'error', 
+            status: 'error' 
+          }),
+          processDocument: async () => ({ 
+            summary: null, 
+            fileId: 'error', 
+            status: 'error' 
+          })
+        };
+        
+        setServiceApi(fallbackApi);
+        
+        connectionCheckTimeout = setTimeout(checkConnection, 1000);
+        return;
+      }
+      
+      // Continue with standard connection check
+      if (!hasGetFiles) {
+        console.warn("API method getFiles is missing, will use fallback for checking connection");
+        
+        // Try checkStatus if getFiles is missing
+        setConnectionStatus('connecting');
+        try {
+          if (typeof serviceApi.checkStatus === 'function') {
+            const status = await serviceApi.checkStatus();
+            console.log("Connection successful with checkStatus:", status);
+            setConnectionStatus('connected');
+            return;
+          } else {
+            throw new Error("No suitable method found for connection check");
+          }
+        } catch (error) {
+          console.error("Connection error details:", error);
+          setConnectionStatus('disconnected');
+          
+          if (retryCount < maxRetries) {
+            retryCount++;
+            connectionCheckTimeout = setTimeout(checkConnection, 3000 * retryCount);
+          }
+          return;
+        }
+      }
+      
+      // Standard connection check with getFiles
       setConnectionStatus('connecting');
       try {
-        // First, try getConfig as it's simpler
-        if (typeof serviceApi.getConfig === 'function') {
-          await serviceApi.getConfig();
-        } else {
-          // Fallback to getChatSessions if getConfig is not available (e.g. older API service structure)
-          await serviceApi.getChatSessions();
-        }
-        
-        if (!isMounted) return;
+        console.log("Checking connection using getFiles()");
+        const response = await serviceApi.getFiles();
+        console.log("Connection successful with getFiles:", response);
         setConnectionStatus('connected');
-        // Assuming getConfig or getChatSessions might return version info or imply connection
-        setBackendVersion('connected'); // Simplified version display
-        
-        // Schedule next check
-        connectionCheckTimeout = setTimeout(checkConnection, 30000); // Check every 30 seconds
+        retryCount = 0;
       } catch (error) {
-        if (!isMounted) return;
-        
-        console.error("Backend connection failed:", error);
+        console.error("Connection error details:", error);
         setConnectionStatus('disconnected');
-        toast({
-          title: "Connection Error",
-          description: "Could not connect to the AI backend. Using offline mode.",
-          variant: "destructive",
-          duration: 5000,
-        });
         
-        // Retry connection check more frequently if disconnected
-        connectionCheckTimeout = setTimeout(checkConnection, 60000); // Retry after 1 minute if disconnected
+        if (retryCount < maxRetries) {
+          retryCount++;
+          connectionCheckTimeout = setTimeout(checkConnection, 3000 * retryCount);
+        }
       }
     };
     
+    // Initial connection check
     checkConnection();
+    
+    // Set up periodic connection checks
+    const periodicCheck = setInterval(() => {
+      if (isMounted) {
+        console.log("Running periodic connection check...");
+        checkConnection();
+      }
+    }, 60000); // Check every minute
     
     return () => {
       isMounted = false;
       if (connectionCheckTimeout) {
         clearTimeout(connectionCheckTimeout);
       }
+      clearInterval(periodicCheck);
     };
   }, [serviceApi, toast]);
 
@@ -150,18 +246,11 @@ export default function ChatPageClient({
     }
   }, [messages]);
 
-  // Auto-scroll to bottom of messages
-  useEffect(() => {
-    if (messagesContainerRef.current) {
-      messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
-    }
-  }, [messages]); // Re-check: should be visibleMessages or a combination
-
   // Fetch chat history from backend or localStorage
   useEffect(() => {
     const loadChatSessions = async () => {
       // Ensure serviceApi and its methods are available
-      if (connectionStatus !== 'connected' || !serviceApi || typeof serviceApi.getChatSessions !== 'function') {
+      if (connectionStatus !== 'connected' || !serviceApi || typeof serviceApi.getChatHistory !== 'function') {
         console.warn('loadChatSessions: API service not ready or not connected. Falling back to local.');
         const localSessions = getLocalChatHistory();
         if (localSessions.length > 0) {
@@ -173,7 +262,8 @@ export default function ChatPageClient({
       }
       
       try {
-        const sessions = await serviceApi.getChatSessions();
+        // Pass a special value or use the chatId state to get all sessions
+        const sessions = await serviceApi.getChatHistory(chatId || 'all');
         if (sessions && sessions.length > 0) {
           setCurrentSession(sessions[0]); // Load the most recent session
         } else {
@@ -227,139 +317,222 @@ export default function ChatPageClient({
 
   // Load available files from backend
   useEffect(() => {
-    let isMounted = true;
-    let loadFilesTimeout: NodeJS.Timeout | null = null;
-    let loadAttempts = 0;
-    const maxAttempts = 3;
-    
     const loadAvailableFiles = async () => {
-      if (!isMounted || connectionStatus !== 'connected' || !serviceApi || typeof serviceApi.getFiles !== 'function') return;
+      if (connectionStatus !== 'connected' || !serviceApi) return;
       
       try {
-        if (loadAttempts >= maxAttempts) return; // Max retries reached
-        loadAttempts++;
+        setIsLoadingFiles(true);
+        console.log("Calling getFiles method...");
         
-        const filesData = await serviceApi.getFiles();
-        if (!isMounted) return;
-        
-        // Handle file data (logging is fine, actual state update for files might be elsewhere or not needed here)
-        if (filesData && filesData.files && Array.isArray(filesData.files)) {
-          console.log(`Loaded ${filesData.files.length} files from backend`);
-        } else if (Array.isArray(filesData)) { // If API returns array directly
-          console.log(`Loaded ${filesData.length} files from backend`);
+        // Check if getFiles is available
+        if (typeof serviceApi.getFiles !== 'function') {
+          console.error("getFiles method not found in API service");
+          toast({
+            title: "API Error",
+            description: "File listing service not available",
+            variant: "destructive"
+          });
+          setIsLoadingFiles(false);
+          return;
         }
         
-        // Schedule next refresh
-        if (isMounted) {
-          loadFilesTimeout = setTimeout(loadAvailableFiles, 300000); // Refresh every 5 minutes
+        const response = await serviceApi.getFiles();
+        console.log("Raw getFiles response:", response);
+        
+        // Fix: Directly set the files array if it exists in the response
+        if (response && typeof response === 'object') {
+          if (Array.isArray(response.files)) {
+            // Standard response format with files property
+            setAvailableFiles(response.files);
+            console.log(`Successfully loaded ${response.files.length} files from files property`);
+          } else if (Array.isArray(response)) {
+            // Handle case where response itself is the files array
+            setAvailableFiles(response);
+            console.log(`Successfully loaded ${response.length} files from direct array`);
+          } else {
+            // Last attempt - try to extract files if they're in a nested property
+            const filesArray = findFilesArrayInObject(response);
+            if (filesArray) {
+              setAvailableFiles(filesArray);
+              console.log(`Found files array in nested property: ${filesArray.length} files`);
+            } else {
+              console.error("Could not locate files array in response:", response);
+              setAvailableFiles([]);
+            }
+          }
+        } else {
+          console.error("Invalid response format from getFiles:", response);
+          setAvailableFiles([]);
         }
       } catch (error) {
-        if (!isMounted) return;
-        console.error("Error loading files from backend:", error);
-        // Exponential backoff for retries
-        const backoff = Math.min(15000, 2000 * Math.pow(2, loadAttempts));
-        loadFilesTimeout = setTimeout(loadAvailableFiles, backoff);
+        console.error("Error loading files:", error);
+        toast({
+          title: "Error",
+          description: "Failed to load available files",
+          variant: "destructive"
+        });
+        setAvailableFiles([]); // Ensure availableFiles is always an array
+      } finally {
+        setIsLoadingFiles(false);
       }
     };
     
-    if (connectionStatus === 'connected' && serviceApi) {
-      // Initial load with a short delay
-      loadFilesTimeout = setTimeout(loadAvailableFiles, 1000);
+    loadAvailableFiles();
+  }, [connectionStatus, serviceApi, toast]);
+  
+  // Helper function to find files array in complex object structure
+  const findFilesArrayInObject = (obj: any): any[] | null => {
+    // Check if it's an array of objects with filename property (most likely files)
+    if (Array.isArray(obj) && obj.length > 0 && typeof obj[0] === 'object' && obj[0].filename) {
+      return obj;
     }
     
-    return () => {
-      isMounted = false;
-      if (loadFilesTimeout) clearTimeout(loadFilesTimeout);
-    };
-  }, [connectionStatus, serviceApi]);
-
-  // Generate a new chat ID
-  const generateNewChatId = () => {
-    return `chat_${Math.random().toString(36).substring(2, 10)}_${Date.now()}`;
+    // Search through object properties
+    if (obj && typeof obj === 'object') {
+      for (const key in obj) {
+        // If property is named 'files' and is an array, return it
+        if (key === 'files' && Array.isArray(obj[key])) {
+          return obj[key];
+        }
+        
+        // If property is an array of objects with filename property
+        if (Array.isArray(obj[key]) && obj[key].length > 0 && 
+            typeof obj[key][0] === 'object' && obj[key][0].filename) {
+          return obj[key];
+        }
+        
+        // Recursively search nested objects
+        if (typeof obj[key] === 'object' && obj[key] !== null) {
+          const result = findFilesArrayInObject(obj[key]);
+          if (result) return result;
+        }
+      }
+    }
+    
+    return null;
   };
-  
+
   // Start a new chat session
   const startNewSession = useCallback(async () => {
-    const newChatId = generateNewChatId();
-    setChatId(newChatId); // Ensure chatId state is updated for FileSelector if needed
-    const newSessionData: ChatSession = {
-      id: newChatId,
-      name: `Chat ${new Date().toLocaleTimeString()}`,
-      messages: [{
+    if (!serviceApi || connectionStatus !== 'connected') {
+      console.log("Starting offline session");
+      // Create local session without contacting backend
+      const newSession = {
         id: uuidv4(),
-        sender: 'assistant', // Ensure sender is correctly typed
-        content: "Hello! How can I assist you today?",
-        timestamp: Date.now()
-      }],
-      lastModified: Date.now(),
-      selectedFiles: [] // Initialize with empty selected files
-    };
-    
-    setCurrentSession(newSessionData);
-    setMessages(newSessionData.messages); // Set messages from the new session
-    setUploadedFile(null);
-    setDocumentSummary(null);
-    setSelectedFilesList([]); // Reset selected files list for new session
-    
-    // Save to backend if connected, otherwise save locally
-    if (connectionStatus === 'connected' && serviceApi && typeof serviceApi.createChatSession === 'function') {
-      try {
-        await serviceApi.createChatSession(newSessionData);
-      } catch (error) {
-        console.error("Error saving new chat session to backend:", error);
-        saveChatSession(newSessionData); // Fallback to local
-        toast({ title: "Offline Mode", description: "New session saved locally.", variant: "default" });
-      }
-    } else {
-      saveChatSession(newSessionData);
-    }
-  }, [connectionStatus, serviceApi, toast]);
-
-  // Load chat history
-  const loadChatHistory = useCallback(async (id: string) => {
-    // Ensure serviceApi and its methods are available
-    if (!serviceApi || typeof serviceApi.getChatSessions !== 'function') {
-        console.warn('loadChatHistory: API service not fully initialized, falling back to local data');
-        const localHistory = getLocalChatHistory();
-        const localSession = localHistory.find(s => s.id === id);
-        if (localSession) {
-          setCurrentSession(localSession);
-          setSelectedFilesList(localSession.selectedFiles || []);
-        } else {
-          await startNewSession(); // await to ensure session is set
-        }
-        setIsLoading(false);
-        return;
+        name: "New Chat",
+        messages: [],
+        lastModified: Date.now()
+      };
+      setCurrentSession(newSession);
+      setChatId(newSession.id);
+      return newSession;
     }
 
     try {
       setIsLoading(true);
-      const sessions = await serviceApi.getChatSessions(); // Assuming this returns ChatSession[]
-      // Find the session by ID
-      const session = sessions.find((s: any) => s.id === id); // Use 'any' if structure is uncertain
+      console.log("Creating new session on backend");
       
-      if (session) {
-        setCurrentSession(session);
-        setSelectedFilesList(session.selectedFiles || []);
-      } else {
-        // If not found on backend, try local
-        const localHistory = getLocalChatHistory();
-        const localSession = localHistory.find(s => s.id === id);
-        if (localSession) {
-          setCurrentSession(localSession);
-          setSelectedFilesList(localSession.selectedFiles || []);
-        } else {
-          await startNewSession(); // await
-        }
+      // Call backend to create a session
+      const response = await serviceApi.createChatSession();
+      
+      // Create new session object
+      const newSession = {
+        id: response.chat_id,
+        name: response.chat_name || "New Chat",
+        messages: [],
+        lastModified: Date.now()
+      };
+      
+      // Set current session state
+      setCurrentSession(newSession);
+      setChatId(newSession.id);
+      
+      // Update selected files if needed
+      if (selectedFilesList.length > 0) {
+        await serviceApi.updateFileSelection({
+          sessionId: newSession.id,
+          files: selectedFilesList
+        });
       }
+      
+      console.log("New session created:", newSession);
+      return newSession;
     } catch (error) {
-      console.error("Error loading chat history:", error);
-      toast({ title: "Error", description: "Failed to load chat history.", variant: "destructive" });
-      await startNewSession(); // await
+      console.error("Error creating new session:", error);
+      toast({
+        title: "Error",
+        description: "Failed to create new chat",
+        variant: "destructive"
+      });
+      
+      // Fall back to local session
+      const fallbackSession = {
+        id: uuidv4(),
+        name: "New Chat (Offline)",
+        messages: [],
+        lastModified: Date.now()
+      };
+      setCurrentSession(fallbackSession);
+      setChatId(fallbackSession.id);
+      return fallbackSession;
     } finally {
       setIsLoading(false);
     }
-  }, [serviceApi, toast, startNewSession]);
+  }, [connectionStatus, serviceApi, selectedFilesList, toast]);
+
+  // Load existing chat history
+  const loadChatHistory = useCallback(async (id: string) => {
+    try {
+      setIsLoading(true);
+      
+      if (!serviceApi || connectionStatus !== 'connected') {
+        throw new Error("API service not available");
+      }
+      
+      console.log("Loading chat history from backend:", id);
+      const history = await serviceApi.getChatHistory(id);
+      
+      if (!history) {
+        throw new Error("No history found");
+      }
+      
+      // Convert backend format to frontend format
+      const session = {
+        id: history.chat_id,
+        name: history.chat_name || "Chat",
+        messages: (history.messages || []).map((msg: any) => ({
+          id: msg.id || uuidv4(),
+          sender: msg.role === "user" ? "user" : "assistant",
+          content: msg.content,
+          timestamp: new Date(msg.timestamp).getTime() || Date.now()
+        })),
+        lastModified: new Date(history.updated_at).getTime() || Date.now()
+      };
+      
+      // Update state
+      setCurrentSession(session);
+      setMessages(session.messages || []);
+      setChatId(session.id);
+      
+      // Update selected files if provided
+      if (history.selected_files && Array.isArray(history.selected_files)) {
+        setSelectedFilesList(history.selected_files);
+      }
+      
+      return session;
+    } catch (error) {
+      console.error("Error loading chat history:", error);
+      toast({ 
+        title: "Error", 
+        description: "Failed to load chat history", 
+        variant: "destructive" 
+      });
+      await startNewSession();
+      return null;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [connectionStatus, serviceApi, startNewSession, toast]);
 
 
   // Effect for initializing chat: runs when initialChatId, loadChatHistory, or startNewSession changes.
@@ -367,44 +540,33 @@ export default function ChatPageClient({
     const initChat = async () => {
       if (initialChatId) {
         await loadChatHistory(initialChatId);
-      } else if (!currentSession) { // Only start new session if no current one and no initialChatId
+      } else if (!currentSession) {
         await startNewSession();
       }
     };
-    initChat();
-  }, [initialChatId, loadChatHistory, startNewSession, currentSession]);
-
+    
+    if (connectionStatus === 'connected') {
+      initChat();
+    }
+  }, [connectionStatus, initialChatId, currentSession, loadChatHistory, startNewSession]);
 
   // Handle file selection change
   const handleFileSelectionChange = useCallback(async (files: string[]) => {
-    // Prevent update if selection hasn't changed
-    const currentFilesString = JSON.stringify(selectedFilesList);
-    const newFilesString = JSON.stringify(files);
-    if (currentFilesString === newFilesString) return;
-    
     setSelectedFilesList(files);
     
-    if (currentSession) {
-      const updatedSession = { ...currentSession, selectedFiles: files, lastModified: Date.now() };
-      setCurrentSession(updatedSession);
-      saveChatSession(updatedSession); // Save locally immediately
-      
-      // Notify user of selection change
-      if (currentFilesString !== newFilesString && files.length > 0) {
-        toast({ title: "Files Selected", description: `${files.length} file${files.length !== 1 ? 's' : ''} selected.`, variant: "default" });
-      }
-      
-      // Update backend if connected
-      if (connectionStatus === 'connected' && serviceApi && typeof serviceApi.updateFileSelection === 'function') {
-        try {
-          await serviceApi.updateFileSelection({ sessionId: currentSession.id, files: files });
-        } catch (error) {
-          // Log error but don't block UI, local save is primary
-          console.warn("Background file selection update to backend failed:", error);
-        }
+    // Update backend if we have a session and connected
+    if (chatId && connectionStatus === 'connected' && serviceApi?.updateFileSelection) {
+      try {
+        await serviceApi.updateFileSelection({
+          sessionId: chatId,
+          files: files
+        });
+        console.log(`Updated file selection on backend: ${files.length} files`);
+      } catch (error) {
+        console.error("Error updating file selection on backend:", error);
       }
     }
-  }, [selectedFilesList, currentSession, connectionStatus, serviceApi, toast]);
+  }, [chatId, connectionStatus, serviceApi]);
 
   // Open file selector dialog
   const openFileSelector = useCallback(() => {
@@ -418,66 +580,165 @@ export default function ChatPageClient({
   // Send message to chat
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
+    
     if (!input.trim() || isWaitingForResponse) return;
-
+    
     try {
       setIsWaitingForResponse(true);
-      const userMessage: ChatMessage = { id: Date.now().toString(), sender: "user", content: input, timestamp: Date.now() };
       
-      // Optimistically update UI with user's message
-      setMessages(prevMessages => {
-        const newMessages = [...prevMessages, userMessage];
-        if (currentSession) {
-          const updatedSession = { ...currentSession, messages: newMessages, lastModified: Date.now() };
-          setCurrentSession(updatedSession);
-          saveChatSession(updatedSession); // Save updated session locally
-        }
-        return newMessages;
-      });
+      // Create user message
+      const userMessage: ChatMessage = {
+        id: uuidv4(),
+        sender: "user",
+        content: input,
+        timestamp: Date.now()
+      };
       
-      const sentInput = input; // Store input before clearing
-      setInput(""); // Clear input field immediately
+      // Add to current messages
+      setMessages(prevMessages => [...prevMessages, userMessage]);
       
-      // If connected, send to backend
-      if (connectionStatus === 'connected' && serviceApi && typeof serviceApi.sendChatMessage === 'function') {
-        // Apply settings to the request payload
-        const requestPayload = applySettingsToRequest({
+      // Remember input then clear it
+      const sentInput = input;
+      setInput("");
+      
+      // Check if serviceApi is available and has the required methods
+      const hasSendChatMessage = serviceApi && typeof serviceApi.sendChatMessage === 'function';
+      
+      if (!serviceApi || !hasSendChatMessage || connectionStatus !== 'connected') {
+        console.error("Cannot send message:", 
+          !serviceApi ? "API service not available" : 
+          !hasSendChatMessage ? "sendChatMessage method missing" : 
+          "Not connected to backend");
+        
+        showOfflineMessage();
+        return;
+      }
+      
+      // Only execute this if connected and sendChatMessage is available
+      try {
+        console.log("Sending message to backend with parameters:", {
           message: sentInput,
           selected_files: selectedFilesList,
-          sessionId: chatId // Use the current chatId state
+          sessionId: chatId
         });
-
-        const response = await serviceApi.sendChatMessage(requestPayload);
         
-        // Handle different response structures
-        if (response && response.all_messages && Array.isArray(response.all_messages)) {
-          setMessages(response.all_messages); // Backend provides full history
-        } else if (response && response.message) {
-          // Add AI message if only single response is returned
-          const aiMessage: ChatMessage = { id: Date.now().toString(), sender: "assistant", content: response.message, timestamp: Date.now() };
+        const response = await serviceApi.sendChatMessage({
+          message: sentInput,
+          selected_files: selectedFilesList,
+          sessionId: chatId
+        });
+        
+        console.log("Response from backend:", response);
+        handleChatResponse(response);
+      } catch (error) {
+        handleChatError(error);
+      }
+      
+      // Scroll to bottom after message is added
+      setTimeout(() => {
+        if (messagesContainerRef.current) {
+          messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+        }
+      }, 100);
+    } catch (error) {
+      console.error("Error in message handling:", error);
+    } finally {
+      setIsWaitingForResponse(false);
+    }
+    
+    // Helper function to show offline message
+    function showOfflineMessage() {
+      setTimeout(() => {
+        const offlineMessage: ChatMessage = {
+          id: uuidv4(),
+          sender: "assistant",
+          content: "I'm currently offline. Your message has been saved and will be processed when connection is restored.",
+          timestamp: Date.now(),
+          error: true
+        };
+        
+        setMessages(prevMessages => [...prevMessages, offlineMessage]);
+        setIsWaitingForResponse(false);
+      }, 500); // Short delay for better UX
+    }
+    
+    // Helper function to handle chat response
+    function handleChatResponse(response: any) {
+      if (response) {
+        if (response.all_messages && Array.isArray(response.all_messages)) {
+          // Map backend messages to our format
+          interface BackendMessage {
+            id?: string;
+            role: "user" | "assistant" | string;
+            content: string;
+            timestamp: string | number | Date;
+          }
+
+          const mappedMessages: ChatMessage[] = response.all_messages.map((msg: BackendMessage): ChatMessage => ({
+            id: msg.id || uuidv4(),
+            sender: msg.role === "user" ? "user" : "assistant",
+            content: msg.content,
+            timestamp: new Date(msg.timestamp).getTime() || Date.now()
+          }));
+          
+          setMessages(mappedMessages);
+        } 
+        else if (response.message) {
+          const aiMessage: ChatMessage = {
+            id: uuidv4(),
+            sender: "assistant",
+            content: response.message,
+            timestamp: Date.now()
+          };
+          
           setMessages(prevMessages => [...prevMessages, aiMessage]);
         }
         
-        // Update chat name if backend suggests one
-        if (response && response.chat_name && currentSession) {
-          setCurrentSession({ ...currentSession, name: response.chat_name });
+        // Update chat name if provided
+        if (response.chat_name && currentSession) {
+          setCurrentSession((prev: ChatSession | null) => prev ? {
+            ...prev,
+            name: response.chat_name || prev.name
+          } : null);
         }
-      } else {
-        // Offline: Add a placeholder response
-        const offlineResponse: ChatMessage = { id: Date.now().toString(), sender: "assistant", content: "Offline. Message saved locally.", timestamp: Date.now(), error: true };
-        setMessages(prevMessages => [...prevMessages, offlineResponse]);
+      }
+    }
+    
+    // Helper function to handle chat errors
+    function handleChatError(error: any) {
+      console.error("Error sending message:", error);
+      
+      // Check if it's a connection error
+      const isConnectionError = error instanceof Error && 
+        (error.message.includes('network') || 
+         error.message.includes('connection') ||
+         error.message.includes('ECONNREFUSED') ||
+         error.message.includes('timeout'));
+      
+      if (isConnectionError) {
+        setConnectionStatus('disconnected');
       }
       
-      // Ensure scroll to bottom after messages update
-      setTimeout(() => { messagesContainerRef.current?.scrollTo({ top: messagesContainerRef.current.scrollHeight, behavior: 'smooth' }); }, 100);
+      // Add error message to chat
+      const errorMessage: ChatMessage = {
+        id: uuidv4(),
+        sender: "assistant",
+        content: isConnectionError
+          ? "I can't reach the backend server right now. Please check your connection."
+          : "Sorry, there was an error processing your message. Please try again.",
+        timestamp: Date.now(),
+        error: true
+      };
       
-    } catch (error) {
-      console.error("Error sending message:", error);
-      const errorMessage: ChatMessage = { id: Date.now().toString(), sender: "assistant", content: "Error processing message.", timestamp: Date.now(), error: true };
       setMessages(prevMessages => [...prevMessages, errorMessage]);
-      toast({ title: "Error", description: "Failed to send message.", variant: "destructive" });
-    } finally {
-      setIsWaitingForResponse(false);
+      
+      toast({
+        title: "Error",
+        description: isConnectionError 
+          ? "Connection to backend failed"
+          : "Failed to send message",
+        variant: "destructive"
+      });
     }
   };
 
@@ -495,16 +756,16 @@ export default function ChatPageClient({
       // Upload the file
       const response = await serviceApi.uploadFile(file, (progress) => setUploadProgress(progress));
       
-      // Process the document using returned fileId (which should be filename)
+      // Process the document using returned fileId
       setFileProcessingStep("Processing document...");
-      const result = await serviceApi.processDocument({ fileId: response.filename, fileName: response.fileName }); // Ensure correct params
+      const result = await serviceApi.processDocument({ fileId: response.fileId, fileName: response.fileName }); // Use correct property
       
       setDocumentSummary(result.summary || "Document processed."); // Display summary
       
       // Auto-select file if setting is enabled
       const uploadSettings = loadUploadSettings();
       if (uploadSettings.autoAddToChat) {
-        handleFileSelectionChange([...selectedFilesList, response.filename]); // Use filename from response
+        handleFileSelectionChange([...selectedFilesList, response.fileName]); // Use fileName from response
       }
       
       toast({ title: "File processed", description: "File ready to use." });
@@ -546,8 +807,8 @@ export default function ChatPageClient({
       // Update UI to reflect processing state
       setFileProcessingStep("Processing document...");
       
-      // Use the filename from the upload response (which is fileId in some contexts)
-      const backendFilename = uploadResponse.filename; 
+      // Use the fileId from the upload response
+      const backendFilename = uploadResponse.fileId; 
       const newSelectedFiles = [...selectedFilesList, backendFilename];
       setSelectedFilesList(newSelectedFiles); // Auto-select the uploaded file
       
@@ -573,277 +834,443 @@ export default function ChatPageClient({
     }
   };
 
-  // Trigger file dialog
+  // Check connection function that can be passed to the ConnectionStatus component
+  const checkConnection = useCallback(async () => {
+    if (!serviceApi) return;
+    
+    setConnectionStatus('connecting');
+    try {
+      if (typeof serviceApi.checkStatus === 'function') {
+        await serviceApi.checkStatus();
+        setConnectionStatus('connected');
+      } else if (typeof serviceApi.getFiles === 'function') {
+        await serviceApi.getFiles();
+        setConnectionStatus('connected');
+      } else {
+        throw new Error("No suitable API method found");
+      }
+    } catch (error) {
+      console.error("Connection check failed:", error);
+      setConnectionStatus('disconnected');
+    }
+  }, [serviceApi]);
+
   const triggerFileDialog = () => {
     fileInputRef.current?.click();
   };
   
-  // Remove uploaded file
-  const removeUploadedFile = useCallback(() => {
-    setUploadedFile(null);
-    setDocumentSummary(null);
-    setFileProcessingStep("");
-    setUploadProgress(0);
-  }, []);
-
-  const [chatId, setChatId] = useState<string>(initialChatId || generateNewChatId());
-  
-  // Handle selected files prop change
-  useEffect(() => {
-    // Only update if the prop actually changes and is different from current state
-    if (selectedFiles && JSON.stringify(selectedFiles) !== JSON.stringify(selectedFilesList)) {
-      handleFileSelectionChange(selectedFiles);
-    }
-  }, [selectedFiles, handleFileSelectionChange, selectedFilesList]);
-  
-  return (
-    <div className="flex flex-col flex-1 h-full w-full overflow-hidden pt-3 pb-4">
-      <Card className="flex flex-col h-full border-0 shadow-2xl glassmorphic animated-smoke-bg">
-        <CardHeader className="p-2 border-b border-border/50 shrink-0">
-          <div className="flex justify-between items-center">
-            <CardTitle className="text-base truncate max-w-[70%]">
-              {currentSession?.name || "Nebula Chat"}
-              {connectionStatus !== 'connected' && (
-                <span className="ml-2 text-[10px] bg-destructive/20 text-destructive px-1.5 py-0.5 rounded-full">
-                  Offline
-                </span>
-              )}
-            </CardTitle>
-            <div className="flex gap-1">
-              <Button 
-                variant="outline" 
-                size="sm" 
-                onClick={openFileSelector}
-                className="h-7 text-xs px-2 flex items-center gap-1"
-                disabled={connectionStatus !== 'connected'}
-              >
-                <FolderOpen className="h-3 w-3" />
-                <span className="hidden sm:inline">Files</span>
-                {selectedFilesList.length > 0 && (
-                  <span className="bg-primary text-primary-foreground rounded-full px-1.5 text-[10px]">
-                    {selectedFilesList.length}
-                  </span>
-                )}
-              </Button>
-              <Button 
-                variant="outline" 
-                size="sm" 
-                onClick={startNewSession} 
-                className="h-7 text-xs px-2"
-              >
-                New Chat
-              </Button>
-            </div>
+  // Connection status component to display the current connection state
+  function ConnectionStatus({ 
+    status, 
+    onReconnect 
+  }: { 
+    status: 'connected' | 'connecting' | 'disconnected',
+    onReconnect?: () => void
+  }) {
+    return (
+      <div 
+        className={`flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${
+          status === 'connected' 
+            ? 'bg-green-500/20 text-green-600' 
+            : status === 'connecting'
+            ? 'bg-yellow-500/20 text-yellow-600'
+            : 'bg-destructive/20 text-destructive cursor-pointer'
+        }`}
+        onClick={status === 'disconnected' && onReconnect ? onReconnect : undefined}
+      >
+        <div className={`w-1.5 h-1.5 rounded-full ${
+          status === 'connected' 
+            ? 'bg-green-500' 
+            : status === 'connecting'
+            ? 'bg-yellow-500'
+            : 'bg-destructive'
+        }`} />
+        <span>
+          {status === 'connected' 
+            ? 'Connected' 
+            : status === 'connecting' 
+            ? 'Connecting...' 
+            : 'Disconnected'}
+        </span>
           </div>
-          
-          {selectedFilesList.length > 0 && (
-            <div className="mt-1 p-1 rounded-md bg-secondary/20 text-secondary-foreground">
-              <div className="flex flex-wrap gap-1">
-                {selectedFilesList.slice(0,3).map((filename, index) => ( // Show only first 3
-                  <Badge key={filename} variant="secondary" className="text-[10px] flex items-center gap-1 max-w-[150px]">
-                    <FileText className="h-2 w-2" />
-                    <span className="truncate">{filename.replace(/^\d+_/, '')}</span>
-                    <Button 
-                      variant="ghost" 
-                      size="icon" 
-                      className="h-3 w-3 p-0 ml-1" 
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleFileSelectionChange(selectedFilesList.filter(f => f !== filename));
-                      }}
-                    >
-                      <XCircle className="h-2 w-2" />
-                    </Button>
-                  </Badge>
-                ))}
-                {selectedFilesList.length > 3 && (
-                  <Badge variant="outline" className="text-[10px]">
-                    +{selectedFilesList.length - 3} more
-                  </Badge>
-                )}
-              </div>
-            </div>
-          )}
-          
-          {uploadedFile && (
-            <div className="mt-1 p-1 rounded-md bg-secondary/50 text-secondary-foreground">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1">
-                  <FileText size={12} />
-                  <span className="font-medium text-xs truncate max-w-[150px]">{uploadedFile.name}</span>
-                </div>
-                <Button variant="ghost" size="icon" className="h-5 w-5" onClick={(e) => {
-                  e.preventDefault();
-                  removeUploadedFile();
-                }}>
-                  <Trash2 size={12} />
-                </Button>
-              </div>
-              
-              {isSummarizing && (
-                <div className="mt-1">
-                  <div className="flex justify-between text-[10px] mb-1">
-                    <span className="truncate max-w-[80%]">{fileProcessingStep || "Processing..."}</span>
-                    <span>{Math.round(uploadProgress)}%</span>
-                  </div>
-                  <div className="w-full bg-secondary h-1 rounded-full overflow-hidden">
-                    <div 
-                      className="bg-primary h-full transition-all duration-300" 
-                      style={{ width: `${uploadProgress}%` }}
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-          {documentSummary && !isSummarizing && (
-             <div className="mt-1 text-[10px] p-1 rounded-md bg-muted/30 flex items-center justify-between">
-                <span className="font-medium">Document processed</span>
-                <Button 
-                  variant="ghost" 
-                  className="h-5 text-[10px] px-1" 
-                  onClick={() => toast({
-                    title: "Document Summary",
-                    description: documentSummary.substring(0, 200) + (documentSummary.length > 200 ? "..." : ""),
-                  })}>
-                  View Summary
-                </Button>
-             </div>
-          )}
-        </CardHeader>
-        
-        <div className="flex-1 overflow-y-auto p-2" ref={messagesContainerRef}>
-          <div className="flex flex-col justify-end min-h-full">
-            <div className="space-y-2">
-              {visibleMessages.map((msg) => (
+        );
+      }
+  }
+
+  // Message list component to display chat messages
+  function MessageList({
+    messages,
+    isWaitingForResponse,
+    containerRef
+  }: {
+    messages: ChatMessage[],
+    isWaitingForResponse: boolean,
+    containerRef: React.RefObject<HTMLDivElement>
+  }) {
+    // Pass the ref through props instead of accessing parent scope
+    
+    return (
+      <div className="flex-1 overflow-y-auto p-2" ref={containerRef}>
+        <div className="flex flex-col justify-end min-h-full">
+          <div className="space-y-2">
+            {messages.map((msg) => (
+              <div
+                key={msg.id}
+                className={`flex ${
+                  msg.sender === "user" ? "justify-end" : "justify-start"
+                }`}
+              >
                 <div
-                  key={msg.id}
-                  className={`flex ${
-                    msg.sender === "user" ? "justify-end" : "justify-start"
+                  className={`max-w-[80%] p-2 rounded-lg shadow-sm text-xs ${
+                    msg.sender === "user"
+                      ? "bg-primary text-primary-foreground rounded-br-none"
+                      : msg.error
+                      ? "bg-destructive/20 text-destructive-foreground rounded-bl-none border border-destructive/30"
+                      : "bg-secondary text-secondary-foreground rounded-bl-none glassmorphic"
                   }`}
                 >
-                  <div
-                    className={`max-w-[80%] p-2 rounded-lg shadow-sm text-xs ${
-                      msg.sender === "user"
-                        ? "bg-primary text-primary-foreground rounded-br-none"
-                        : msg.error
-                        ? "bg-destructive/20 text-destructive-foreground rounded-bl-none border border-destructive/30"
-                        : "bg-secondary text-secondary-foreground rounded-bl-none glassmorphic"
-                    }`}
-                  >
-                    <p className="whitespace-pre-wrap break-words">{msg.content}</p>
-                    {msg.citations && msg.citations.length > 0 && (
-                      <div className="mt-1 border-t border-primary-foreground/20 pt-1">
-                        <p className="text-[10px] font-semibold">Citations:</p>
-                        <ul className="list-disc list-inside text-[10px]">
-                          {msg.citations.slice(0, 1).map((cite, i) => <li key={i} className="truncate">{cite}</li>)}
-                          {msg.citations.length > 1 && <li className="truncate">+{msg.citations.length - 1} more</li>}
-                        </ul>
-                      </div>
-                    )}
-                    <p className={`text-[8px] ${msg.sender === 'user' ? 'text-primary-foreground/70 text-right' : 'text-muted-foreground/70 text-left'}`}>
-                      {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </p>
-                  </div>
-                </div>
-              ))}
-              {isLoading && ( // General loading for session loading, not message sending
-                <div className="flex justify-center p-4">
-                  <LoadingSpinner size="md" />
-                </div>
-              )}
-               {isWaitingForResponse && ( // Specific spinner for when AI is responding
-                <div className="flex justify-start">
-                    <div className="max-w-[80%] p-2 rounded-lg shadow-sm bg-secondary text-secondary-foreground rounded-bl-none glassmorphic">
-                        <LoadingSpinner size="sm" />
+                  <p className="whitespace-pre-wrap break-words">{msg.content}</p>
+                  {msg.citations && msg.citations.length > 0 && (
+                    <div className="mt-1 border-t border-primary-foreground/20 pt-1">
+                      <p className="text-[10px] font-semibold">Citations:</p>
+                      <ul className="list-disc list-inside text-[10px]">
+                        {msg.citations.slice(0, 1).map((cite, i) => <li key={i} className="truncate">{cite}</li>)}
+                        {msg.citations.length > 1 && <li className="truncate">+{msg.citations.length - 1} more</li>}
+                      </ul>
                     </div>
+                  )}
+                  <p className={`text-[8px] ${msg.sender === 'user' ? 'text-primary-foreground/70 text-right' : 'text-muted-foreground/70 text-left'}`}>
+                    {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </p>
                 </div>
+              </div>
+            ))}
+            
+            {isWaitingForResponse && (
+              <div className="flex justify-start">
+                <div className="max-w-[80%] p-2 rounded-lg shadow-sm bg-secondary text-secondary-foreground rounded-bl-none glassmorphic">
+                  <LoadingSpinner size="sm" />
+                </div>
+              </div>
             )}
-              {messages.length > visibleMessages.length && (
-                <div className="text-center text-[10px] text-muted-foreground">
-                  {messages.length - visibleMessages.length} earlier messages not shown
-                </div>
-              )}
-            </div>
           </div>
         </div>
-        
-        <CardFooter className="p-2 border-t border-border/50 shrink-0">
-          <form onSubmit={handleSendMessage} className="flex w-full items-center gap-1">
-            <div className="relative">
-              <Button 
-                type="button" 
-                variant="outline" 
-                size="icon" 
-                onClick={triggerFileDialog} 
-                aria-label="Upload file"
-                disabled={isSummarizing || connectionStatus !== 'connected'}
-                className={`h-7 w-7 ${(isSummarizing || connectionStatus !== 'connected') ? "opacity-50 cursor-not-allowed" : ""}`}
-              >
-                <Paperclip className="h-3 w-3" />
-              </Button>
-              {uploadedFile && (
-                <div className="absolute -top-1 -right-1 w-2 h-2 bg-primary rounded-full" />
-              )}
-            </div>
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleFileChange}
-              className="hidden"
-              accept=".txt,.pdf,.md,.docx,.json,text/*,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" 
-            />
-            <Input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder={
-                connectionStatus !== 'connected' 
-                  ? "Backend disconnected." 
-                  : (isSummarizing ? "Processing..." : "Type your message...")
-              }
-              className="flex-1 h-7 text-xs glassmorphic"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSendMessage(e as unknown as FormEvent);
-                }
-              }}
-              disabled={isWaitingForResponse || isSummarizing} // Disable when waiting for response or summarizing
-            />
+      </div>
+    );
+  }
+
+  // Chat input component for entering messages and uploading files
+  function ChatInput({
+    input,
+    setInput,
+    onSendMessage,
+    onUploadFile,
+    isWaitingForResponse,
+    isSummarizing,
+    uploadedFile,
+    connectionStatus
+  }: {
+    input: string,
+    setInput: (value: string) => void,
+    onSendMessage: (e: FormEvent) => void,
+    onUploadFile: () => void,
+    isWaitingForResponse: boolean,
+    isSummarizing: boolean,
+    uploadedFile: File | null,
+    connectionStatus: 'connected' | 'disconnected' | 'connecting'
+  }) {
+    // Create a ref for the input element
+    const inputRef = useRef<HTMLInputElement>(null);
+    
+    // Focus the input element on mount and when waiting state changes
+    useEffect(() => {
+      if (!isWaitingForResponse && !isSummarizing && inputRef.current) {
+        inputRef.current.focus();
+      }
+    }, [isWaitingForResponse, isSummarizing]);
+    
+    // Handle click on the input to ensure it's focused
+    const handleInputClick = () => {
+      if (inputRef.current) {
+        inputRef.current.focus();
+      }
+    };
+    
+    return (
+      <CardFooter className="p-2 border-t border-border/50 shrink-0">
+        <form onSubmit={onSendMessage} className="flex w-full items-center gap-1">
+          <div className="relative">
             <Button 
-              type="submit" 
+              type="button" 
+              variant="outline" 
               size="icon" 
-              disabled={isWaitingForResponse || isSummarizing || !input.trim()} 
-              aria-label="Send message"
-              className={`h-7 w-7 transition-all bg-gradient-to-l from-[#FF297F] to-[#4B8FFF] ${(isWaitingForResponse || isSummarizing || !input.trim()) ? "opacity-50" : "opacity-100 hover:scale-105"}`}
+              onClick={onUploadFile} 
+              aria-label="Upload file"
+              disabled={isSummarizing || connectionStatus !== 'connected'}
+              className={`h-7 w-7 ${(isSummarizing || connectionStatus !== 'connected') ? "opacity-50 cursor-not-allowed" : ""}`}
             >
-              {isWaitingForResponse ? <LoadingSpinner size="sm" /> : <Send className="h-3 w-3" />}
+              <Paperclip className="h-3 w-3" />
             </Button>
-          </form>
-        </CardFooter>
-      </Card>
-      <Dialog open={isFileDialogOpen} onOpenChange={setIsFileDialogOpen}>
-        <DialogContent className="sm:max-w-[600px] p-0">
-          <VisuallyHidden>
-            <DialogTitle>File Selector</DialogTitle>
-          </VisuallyHidden>
-          <FileSelector 
-            selectedFiles={selectedFilesList} 
-            onSelectionChange={handleFileSelectionChange}
-            onClose={() => setIsFileDialogOpen(false)}
+            {uploadedFile && (
+              <div className="absolute -top-1 -right-1 w-2 h-2 bg-primary rounded-full" />
+            )}
+          </div>
+          
+          <Input
+            ref={inputRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onClick={handleInputClick}
+            placeholder={
+              connectionStatus !== 'connected' 
+                ? "Backend disconnected." 
+                : (isSummarizing ? "Processing..." : "Type your message...")
+            }
+            className="flex-1 h-7 text-xs glassmorphic"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                onSendMessage(e as unknown as FormEvent);
+              }
+            }}
+            disabled={isWaitingForResponse || isSummarizing}
           />
+          
+          <Button 
+            type="submit" 
+            size="icon" 
+            disabled={isWaitingForResponse || isSummarizing || !input.trim() || connectionStatus !== 'connected'} 
+            aria-label="Send message"
+            className={`h-7 w-7 transition-all bg-gradient-to-l from-[#FF297F] to-[#4B8FFF] 
+              ${(isWaitingForResponse || isSummarizing || !input.trim() || connectionStatus !== 'connected') 
+                 ? "opacity-50" 
+                 : "opacity-100 hover:scale-105"}`}
+          >
+            {isWaitingForResponse ? <LoadingSpinner size="sm" /> : <Send className="h-3 w-3" />}
+          </Button>
+        </form>
+      </CardFooter>
+    );
+  }
+  
+  // Store the API service instance globally for non-hook access
+  useEffect(() => {
+    // Store the API service instance globally for non-hook access
+    if (serviceApi) {
+      setGlobalApiService(serviceApi);
+    }
+  }, [serviceApi]);
+  
+  // Update the sendMessage function to ensure messages are added to the UI
+  const sendMessage = async (messageText: string) => {
+    try {
+      // Create user message
+      const newMessage: ChatMessage = {
+        id: uuidv4(),
+        sender: "user",
+        content: messageText,
+        timestamp: Date.now()
+      };
+      
+      // Important: Update the local messages state FIRST before sending
+      // This ensures the user message appears immediately
+      setMessages((prevMessages: ChatMessage[]) => [...prevMessages, newMessage]);
+      
+      console.log("Sending message to backend with parameters:", {
+        message: messageText,
+        selected_files: selectedFilesList,
+        sessionId: chatId
+      });
+      
+      // Call the API
+      const response = await serviceApi.sendChatMessage({
+        message: messageText,
+        selected_files: selectedFilesList,
+        sessionId: chatId
+      });
+      
+      console.log("Response from backend:", response);
+      
+      // After receiving a response, update the messages state with the AI response
+      if (response && response.message) {
+        const assistantMessage: ChatMessage = {
+          id: uuidv4(),
+          sender: "assistant",
+          content: response.message,
+          timestamp: Date.now()
+        };
+        
+        // Update messages with the assistant's response
+        setMessages((prevMessages: ChatMessage[]) => [...prevMessages, assistantMessage]);
+        
+        // If we received all_messages from the backend, use those to ensure consistency
+        if (response.all_messages && Array.isArray(response.all_messages) && response.all_messages.length > 0) {
+          // Transform the messages to match our local format
+          const formattedMessages = response.all_messages.map((msg: any) => ({
+            id: msg.id || uuidv4(),
+            sender: msg.role === "user" ? "user" : "assistant",
+            content: msg.content,
+            timestamp: new Date(msg.timestamp).getTime() || Date.now()
+          }));
+          
+          setMessages(formattedMessages);
+        }
+        
+        // Update chat name if provided
+        if (response.chat_name) {
+          setCurrentSession(prev => prev ? {
+            ...prev,
+            name: response.chat_name || prev.name
+          } : null);
+        }
+      }
+    } catch (error) {
+      console.error("Error in message handling:", error);
+    }
+  };
+  
+  // Effect for loading chat history
+  useEffect(() => {
+    const loadChatHistory = async () => {
+      if (chatId && serviceApi && typeof serviceApi.getChatHistory === 'function') {
+        try {
+          const history = await serviceApi.getChatHistory(chatId);
+          if (history && history.messages && Array.isArray(history.messages)) {
+            // Format messages from history
+            const formattedMessages = history.messages.map((msg: any) => ({
+              id: msg.id || uuidv4(),
+              sender: msg.role === "user" ? "user" : "assistant",
+              content: msg.content,
+              timestamp: new Date(msg.timestamp || Date.now()).getTime()
+            }));
+            
+            setMessages(formattedMessages);
+          }
+        } catch (error) {
+          console.error("Error loading chat history:", error);
+        }
+      }
+    };
+    
+    loadChatHistory();
+  }, [chatId, serviceApi]);
+      
+  // Create a ref for the end of messages to enable auto-scrolling
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  
+  // Auto-scroll to bottom when new messages arrive
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages]); // Changed from visibleMessages to messages to fix scroll behavior
+
+  // Render the chat interface
+  return (
+    <div className="flex flex-col h-full">
+      <div className="flex-1 overflow-y-auto p-4 space-y-4 messages-container" ref={messagesContainerRef}>
+        {messages.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
+            <p>No messages yet. Start a conversation!</p>
+          </div>
+        ) : (
+          messages.map((message) => (
+            <div 
+              key={message.id} 
+              className={`message ${message.sender === 'user' ? 'user-message' : 'assistant-message'} mb-4`}
+            >
+              <div className="message-content p-3 rounded-lg">
+                {message.sender === 'user' ? (
+                  <p className="whitespace-pre-wrap">{message.content}</p>
+                ) : (
+                  <div 
+                    className="html-content" 
+                    dangerouslySetInnerHTML={{ __html: message.content }} 
+                  />
+                )}
+              </div>
+            </div>
+          ))
+        )}
+        <div className="messages-end-anchor" ref={messagesEndRef} />
+      </div>
+      
+      {/* Message input area */}
+      <form onSubmit={handleSendMessage} className="flex p-4 border-t border-border/50">
+        <div className="flex-1 flex items-center gap-2">
+          <Button 
+            type="button"
+            variant="outline" 
+            size="icon" 
+            onClick={openFileSelector}
+            disabled={connectionStatus !== 'connected' || isWaitingForResponse}
+            title="Select files"
+          >
+            <FolderOpen className="h-4 w-4" />
+            <VisuallyHidden>Select files</VisuallyHidden>
+          </Button>
+          
+          <Button 
+            type="button"
+            variant="outline" 
+            size="icon" 
+            onClick={triggerFileDialog}
+            disabled={connectionStatus !== 'connected' || isWaitingForResponse}
+            title="Upload file"
+          >
+            <Paperclip className="h-4 w-4" />
+            <VisuallyHidden>Upload file</VisuallyHidden>
+          </Button>
+          
+          <Input
+            type="text"
+            placeholder={isWaitingForResponse ? "Waiting for response..." : "Type your message..."}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            disabled={isWaitingForResponse}
+            className="flex-1"
+          />
+          
+          <Button 
+            type="submit" 
+            disabled={!input.trim() || isWaitingForResponse}
+            variant="default"
+            size="icon"
+          >
+            {isWaitingForResponse ? (
+              <LoadingSpinner size="sm" />
+            ) : (
+              <Send className="h-4 w-4" />
+            )}
+            <VisuallyHidden>Send message</VisuallyHidden>
+          </Button>
+        </div>
+      </form>
+      
+      {/* File selector dialog */}
+      <Dialog open={isFileDialogOpen} onOpenChange={setIsFileDialogOpen}>
+        <DialogContent>
+          <DialogTitle>Select Files</DialogTitle>
+          <FileSelector
+            availableFiles={availableFiles}
+            selectedFiles={selectedFilesList}
+            onSelectionChange={handleFileSelectionChange}
+            isLoading={isLoadingFiles}
+          />
+          <DialogFooter>
+            <Button onClick={() => setIsFileDialogOpen(false)}>Done</Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
+      
+      {/* Hidden file input for uploads */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        onChange={handleFileChange}
+        className="hidden"
+        accept=".txt,.pdf,.csv,.md,.json,.js,.py,.html,.css"
+      />
     </div>
   );
 }
-
-interface ChatMessage {
-  id: string;
-  sender: "user" | "assistant"; 
-  content: string;
-  timestamp: number;
-  citations?: string[];
-  error?: boolean;
-}
-
