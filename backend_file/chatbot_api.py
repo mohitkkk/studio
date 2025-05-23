@@ -1,2541 +1,1528 @@
 import os
 import json
 import logging
-import traceback
-import torch
-import ollama
-import sys
+import traceb
+import asyncio
 import re
 import time
-import asyncio
-import uvicorn
-import uuid  # Add missing import for UUID generation
-from typing import List, Dict, Tuple, Optional, Set
-from openai import OpenAI
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body
-from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from typing import Optional as PydanticOptional
+import shutil
+import html
+import uuid
+import cv2
+import numpy as np
 from datetime import datetime
-import hashlib
-import random
-import requests
+from contextlib import asynccontextmanager
+from typing import List, Dict, Tuple, Optional, Any
 
-# Import the configuration
-from config import OLLAMA_CONFIG, get_full_config, SERVER_CONFIG
+import torch
+from openai import OpenAI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, File, UploadFile, Form, HTTPException, Body
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from starlette.websockets import WebSocketState
+from ultrO # <--- IMPORT YOLO
+import chromadb
+from chromadb.utils import embedding_functions
+import fitz
+import uvicorn
 
-# Replace the hardcoded CONFIG with the imported configuration
-CONFIG = get_full_config()
-
-# Create FastAPI application instance
-app = FastAPI()
-
-# Configure CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Modify this to restrict origins in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Define Pydantic models for request and response
-class ChatRequest(BaseModel):
-    message: str
-    selected_files: List[str] = []
-    client_id: str = ""
-    format: str = "html"
-    # Add parameters for customization
-    ollama_model: Optional[str] = None
-    ollama_embedding_model: Optional[str] = None
-    top_k_per_file: Optional[int] = None
-    similarity_threshold: Optional[float] = None
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
-    system_prompt: Optional[str] = None
-    clean_response: Optional[bool] = None
-    remove_hedging: Optional[bool] = None
-    remove_references: Optional[bool] = None
-    remove_disclaimers: Optional[bool] = None
-    ensure_html_structure: Optional[bool] = None
-    custom_hedging_patterns: Optional[List[str]] = None
-    custom_reference_patterns: Optional[List[str]] = None
-    custom_disclaimer_patterns: Optional[List[str]] = None
-    html_tags_to_fix: Optional[List[str]] = None
-    no_info_title: Optional[str] = None
-    no_info_message: Optional[str] = None
-    include_suggestions: Optional[bool] = None
-    custom_suggestions: Optional[List[str]] = None
-    no_info_html_format: Optional[bool] = None
-    
-class ChatResponse(BaseModel):
-    message: str
-    all_messages: Optional[List[dict]] = None
-    chat_name: Optional[str] = None
-    client_id: str
-    status: str = "success"
-
-# Define chat history structure for storage
-class ChatHistory(BaseModel):
-    chat_id: str
-    chat_name: str
-    messages: List[Dict[str, str]] = []
-    selected_files: List[str] = []
-    created_at: str
-    updated_at: str
-    ai_named: bool = False  # Track if AI has already named this chat
-
-class ChatListItem(BaseModel):
-    chat_id: str
-    chat_name: str
-    last_message: str
-    message_count: int
-    updated_at: str
-    selected_files: List[str]
-
-# +++ LangChain Integration: Imports +++
-# from langchain.memory import ConversationBufferMemory # Memory will be handled differently or by client
+from langchain.memory import ConversationBufferMemory
 from langchain.schema import HumanMessage, AIMessage
-# +++++++++++++++++++++++++++++++++++++
 
-# --- Configuration --- (Should be loaded from a file or env vars in production)
-CONFIG = {
-    "vault_file": "vault.txt", # Legacy, less used now
-    "log_file": "chatbot.log",
-    "log_level": "DEBUG", # Changed default to DEBUG as per original code
-    "answer_prefix": "",  # No prefix needed for API
-    "response_templates": {
-        "error": "I encountered an error while processing your question. Please try again."
-    },
-    "ollama_model": "llama3",
-    "ollama_embedding_model": "mxbai-embed-large",
-    "vault_directory": "vault_files/",
-    "vault_metadata": "vault_metadata.json",
-    "chat_history_directory": "chat_histories/", # Added chat history directory
-}
+from doc_processing import common_utils
+from doc_processing import textual_pipeline
+from doc_processing import visual_pipeline
 
-# --- Setup logging FIRST ---
-# Ensure basicConfig is called only once at the very beginning.
 logging.basicConfig(
-    level=getattr(logging, CONFIG["log_level"].upper(), logging.INFO), # Use INFO as default if level is invalid
-    filename=CONFIG["log_file"],
-    filemode='a',
-    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s' # Corrected format string
+    level=os.environ.get("LOG_LEVEL", "DEBUG").upper(),
+    filename="chatbot.log", filemode='a',
+    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-logger.info("--- Logging initialized ---")
+logger.info("--- Main API Logging Initialized ---")
 
-# --- Try importing pypdf AFTER logging is set up ---
-try:
-    from pypdf import PdfReader
-    logger.info("pypdf imported successfully.")
-except ImportError:
-    logger.error("pypdf not found. PDF processing will fail. Please install it using: pip install pypdf")
-    PdfReader = None # Set to None if import fails
+from doc_processing.common_utils import (
+    check_and_install_dependencies,
+    setup_device,
+    check_ollama_server,
+    init_ollama_client,
+    initialize_vault_directory,
+    get_vault_files,
+    add_file_to_vault,
+    update_file_metadata,
+    get_specific_doc_metadata,
+    parse_file_query,
+    remove_doc_from_metadata,
+    generate_no_information_response,
+    track_response_quality,
+    clean_response_language
+)
 
-# ANSI escape codes for colors - kept for potential direct script runs/debugging
-PINK = '\033[95m'
-CYAN = '\033[96m'
-YELLOW = '\033[93m'
-NEON_GREEN = '\033[92m'
-RESET_COLOR = '\033[0m'
+system_message = """
+You are an AI assistant that answers questions based *strictly and solely* on the information contained within the provided document context.
+DO NOT use any information from your general training data or outside knowledge. Your response MUST be grounded ONLY in the text provided in the context snippets.
 
-# Define common section/heading keywords
-heading_keywords = [
-    "section", "chapter", "part", "introduction", "overview", "summary",
-    "conclusion", "references", "appendix", "table of contents", "index",
-    "glossary", "discussion", "results", "methodology", "procedure",
-    "specifications", "requirements", "features", "instructions"
-]
+**VERY IMPORTANT RULE:** DO NOT include any references to the original documents in your answer. This means NO document titles, NO file names, NO page numbers (e.g., "Page 5"), NO block numbers, and NO section numbers (e.g., "Section 2.1"). Integrate the information seamlessly into your response.
 
-# Check for GPU availability
-def setup_device():
-    """Initializes and returns the appropriate device for tensor operations."""
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        gpu_info = f"GPU detected: {torch.cuda.get_device_name(0)}"
-        logging.info(f"Using GPU acceleration: {gpu_info}")
-        print(f"✅ {gpu_info}")
+If the answer to the user's question cannot be found *within the provided document context*, state clearly and concisely that you cannot find the relevant information in the documents. DO NOT guess or make up information.
 
-        # Configure PyTorch to use GPU - updated to avoid deprecation warning
-        torch.set_default_dtype(torch.float32)
-        torch.set_default_device('cuda')
+Format your response using standard Markdown syntax. Use bold for key terms, and bullet points for lists where appropriate.
+Ensure the response is easy to read and directly answers the user's question based *only* on the context.
+"""
 
-        # Return device info for embedding operations
-        return device, True
-    else:
-        logging.info("No GPU detected, using CPU only")
-        print("⚠️ No GPU detected, using CPU. Embeddings will be slower.")
-        return torch.device("cpu"), False
+# ... (existing imports and system_message definition) ...
 
-# Chat history management functions
-def load_chat_history(chat_id: str) -> Dict:
-    """Loads chat history from file based on chat ID."""
-    try:
-        chat_file = os.path.join(CONFIG["chat_history_directory"], f"{chat_id}.json")
-        if os.path.exists(chat_file):
-            with open(chat_file, "r", encoding="utf-8") as f:
-                return json.load(f)
-        else:
-            return None
-    except Exception as e:
-        logger.error(f"Error loading chat history for {chat_id}: {str(e)}")
-        return None
+CONFIG = {
+    # --- General Vault and Core Settings (Keep) ---
+    "vault_directory": "vault_files/",
+    "vault_metadata": "vault_metadata.json",
+    "processed_docs_subdir": "processed_docs",
+    "vector_store_path": "vector_store",
+    "vector_collection_name": "document_chunks",
+    "ollama_model": "llama3:latest",
+    "ollama_embedding_model": "mxbai-embed-large:latest",
+    "log_file": "chatbot.log",
+    "log_level": "DEBUG",
+    "image_dpi": 300, # Still used for initial PDF to image conversion
+    "image_format": "png", # Still used for initial PDF to image conversion and saving crops
 
-def save_chat_history(chat_id: str, chat_name: str, message: Dict = None, selected_files: List[str] = None) -> Dict:
-    """Saves a message to chat history and returns the updated history."""
-    try:
-        history = load_chat_history(chat_id)
-        now = time.strftime("%Y-%m-%d %H:%M:%S")
-        
-        if not history:
-            # Create new history
-            history = {
-                "chat_id": chat_id,
-                "chat_name": chat_name,
-                "messages": [] if message is None else [message],
-                "selected_files": selected_files or [],
-                "created_at": now,
-                "updated_at": now,
-                "ai_named": False
-            }
-        else:
-            # Update existing history
-            if message is not None:
-                history["messages"].append(message)
-            history["updated_at"] = now
-            if selected_files is not None:
-                history["selected_files"] = selected_files
-            
-        # Save to file
-        os.makedirs(CONFIG["chat_history_directory"], exist_ok=True)
-        chat_file = os.path.join(CONFIG["chat_history_directory"], f"{chat_id}.json")
-        with open(chat_file, "w", encoding="utf-8") as f:
-            json.dump(history, f, indent=2)
-            
-        logger.info(f"Chat history saved for {chat_id}, {len(history['messages'])} messages total")
-        return history
-    except Exception as e:
-        logger.error(f"Error saving chat history for {chat_id}: {str(e)}")
-        logger.error(traceback.format_exc())
-        return None
+    # --- Output File Names (Keep) ---
+    "layout_analysis_file": "layout_analysis.json", # Will now store YOLOv8 regions
+    "ocr_results_file": "ocr_results.json",       # Will now store OCR text from YOLOv8 regions & image/table info
 
-async def generate_chat_name(chat_id: str, messages: List[Dict], config: Dict) -> str:
-    """Generates a name for the chat using AI based on conversation content."""
-    try:
-        if not ollama_client or len(messages) < 2:
-            return None
-            
-        # Extract conversation for context
-        conversation_text = "\n".join([f"{m['role']}: {m['content'][:100]}..." for m in messages[:4]])
-        
-        # Create the prompt
-        prompt = f"""Based on the following conversation, generate a short, descriptive title (max 30 chars):
+    # --- Audit Settings (Keep) ---
+    "text_chunk_output_dir": "extracted_text_chunks", # Directory for text chunk audit files
+    "create_plain_text_audit": True, # Toggle for creating text chunk audit files
 
-{conversation_text}
+    "embedding_batch_size": 16, # Still used for ChromaDB batching
 
-Title: """
+    # --- Retrieval Tuning (Keep) ---
+    "visual_context_results": 15, # Number of chunks passed to the LLM
+    "chroma_retrieval_multiplier": 5, # Multiplier for initial Chroma retrieval quantity
 
-        # Call Ollama API
-        response = await asyncio.to_thread(
-            lambda: ollama.chat.completions.create(
-                model=config["ollama_model"],
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_tokens=10
-            )
-        )
-        
-        # Process and save the title
-        title = response.choices[0].message.content.strip()
-        # Remove quotes if present
-        title = re.sub(r'^["\']+|["\']+$', '', title)
-        # Limit length
-        if len(title) > 30:
-            title = title[:27] + "..."
-            
-        # Update chat history with new title
-        history = load_chat_history(chat_id)
-        if history:
-            history["chat_name"] = title
-            history["ai_named"] = True
-            chat_file = os.path.join(CONFIG["chat_history_directory"], f"{chat_id}.json")
-            with open(chat_file, "w", encoding="utf-8") as f:
-                json.dump(history, f, indent=2)
-            
-        logger.info(f"Generated chat name for {chat_id}: '{title}'")
-        return title
-    except Exception as e:
-        logger.error(f"Error generating chat name: {str(e)}")
-        return None
+    # --- Textual Pipeline Settings (Keep as they are separate) ---
+    "textual_max_chunk_size": 800,
+    "textual_chunk_overlap": 0,
+    "textual_top_k_per_doc": 5,
+    "textual_similarity_threshold": 0.45,
+    "textual_context_results_limit": 15,
+    "heading_keywords": ["section", "chapter", "part", "introduction", "overview", "summary", "conclusion", "references", "appendix", "table of contents", "index", "glossary", "discussion", "results", "methodology", "procedure", "specifications", "requirements", "features", "instructions"],
+    "textual_heading_keywords": ["section", "chapter", "introduction", "conclusion"],
 
-# Call this function at startup
-device, has_gpu = setup_device()
+    "yolov8_layout_model_path": 'vault_files/model/yolov8x-seg.pt', # <--- ADD THIS NEW KEY
+    # Label map: Maps YOLOv8 output class IDs (integers) to the category names (strings) they represent.
+    # This MUST match the training of the specific YOLOv8-seg model you are using (PubLayNet standard labels).
+    "yolov8_label_map": {0: "text", 1: "title", 2: "list", 3:"table", 4:"figure"}, # <--- ADD THIS NEW KEY
+    "yolov8_score_threshold": 0.5, # Minimum confidence score for a detected region to be kept (YOLOv8 'conf' parameter in predict)
+    "layoutparser_text_categories": ["text", "title", "list", "caption"], # Which YOLOv8 categories should be OCR'd and treated as text items
+    "layoutparser_image_categories": ["figure"], # Which YOLOv8 categories should be saved as image files
+    "layoutparser_table_categories": ["table"], # Which YOLOv8 categories should be saved as image files (or processed with table tools)
+    "chunk_vertical_proximity_threshold_px": 15, # Max vertical pixel gap between text regions to potentially merge them
+    "chunk_vertical_proximity_threshold_ratio_of_height": 0.5, # Max vertical gap as % of taller region height to potentially merge
+    "chunk_horizontal_overlap_ratio": 0.5, # Minimum horizontal overlap ratio to consider regions in the same conceptual column/flow for merging
+    # Categories that, when encountered, typically indicate the start of a new distinct chunk (e.g., title, caption)
+    "always_new_chunk_categories": ["title", "caption"], # Which YOLOv8 categories should always start a new chunk
+    # Categories that can be merged with adjacent items of the same or other mergeable categories
+    "merge_categories": ["text", "list"], # Which YOLOv8 categories can be merged based on proximity/alignment
+    "min_chunk_text_length": 10, # Minimum character length for a final chunk to be created by the chunking function
 
-# Add this parameter to the CONFIG dictionary
+    # --- Tesseract Settings (Still used for OCR on Crops in Step 4) (Keep) ---
+    "tesseract_lang": "eng", # Language for Tesseract OCR on cropped regions
+    "tesseract_ocr_crop_psm": 6, # PSM to use for Tesseract OCR *on cropped text regions*. PSM 6 or 7 are often good for crops.
+    "tesseract_timeout_block": 30, # Timeout for individual block-level OCR calls
+
+    # --- Image Processing & Saving Settings (Keep) ---
+    "text_crop_margin": 2, # Margin for cropping text regions before OCR
+    "image_crop_margin": 5, # Margin for cropping image/table regions before saving
+    "jpeg_quality": 90, # Quality for saving JPEG crops
+    "png_compression": 3, # Compression level for saving PNG crops
+    "perform_ocr_on_diagrams": True, # Toggle OCR on image crops (using diagram_ocr_psm)
+    "diagram_ocr_psm": 11, # PSM for OCR on diagram crops (e.g., PSM 11 for sparse text in diagrams)
+
+    "min_chunk_length_for_indexing": 5, # Minimum character length for a chunk to be sent to the vector index (final filter in Step 5)
+
+    # --- Preprocessing Settings (Keep) ---
+    "enable_deskewing": True, # Still used in preprocess_image_opencv before passing to YOLOv8
+    "enable_binarization_visual": True, # Still used in preprocess_image_opencv before passing to YOLOv
+
+    # --- Fallback & Debug Settings (Keep) ---
+    "fallback_page_width": 1000, # Used if image dimensions can't be read
+    "fallback_page_height": 1400,
+    "debug_layout_visualization": True, # Toggle YOLOv8 debug image visualization
+    "debug_layout_output_subdir": "debug_layout", # Directory for YOLOv8 debug images
+    "debug_mode": True, # General debug toggle
+    "debug_target_doc_id": "1747374358_2fb6b580", # Specific doc for debug logging
+    "response_tracking_dir": "response_tracking", # Directory for response tracking files
+
+    # --- Keep existing dependency/device info (Used by YOLOv8) ---
+    "use_gpu": False, # Keep based on your system check result
+    "device": 'cpu', # Keep based on your system check result, will be passed to YOLOv8 predict implicitly/explicitly
+    "chat_timeout": 60.0 # Keep chat timeout
+}
+
+current_handlers = logger.handlers[:]
+for handler in current_handlers: logger.removeHandler(handler)
+logging.basicConfig(
+    level=getattr(logging, CONFIG["log_level"].upper(), logging.INFO),
+    filename=CONFIG["log_file"],
+    filemode='a',
+    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+logger.info("--- Main API Logging Re-initialized with CONFIG Settings ---")
+
+device, has_gpu = common_utils.setup_device(CONFIG)
 CONFIG["use_gpu"] = has_gpu
 CONFIG["device"] = device
 
-# --- Dependency and Connectivity Checks ---
-def check_dependencies() -> Dict[str, bool]:
-    """Checks if all required dependencies are available."""
-    status = {
-        "torch": False,
-        "ollama": False,
-        "fastapi": False,
-        "pypdf": False,
-        "requests": False,
-        # +++ LangChain Integration: Check +++
-        "langchain": False
-        # +++++++++++++++++++++++++++++++++++
-    }
+DEPENDENCY_STATUS = common_utils.check_and_install_dependencies(CONFIG)
+PYMUPDF_AVAILABLE = DEPENDENCY_STATUS.get("fitz", False)
 
-    # Check torch
-    try:
-        import torch
-        status["torch"] = True
-        logger.info("PyTorch available: ✓")
-    except ImportError:
-        logger.critical("PyTorch not available. This will affect embedding generation.")
-        print("❌ ERROR: PyTorch not found. Install with: pip install torch")
-    # Check ollama
-    try:
-        import ollama
-        status["ollama"] = True
-        logger.info("Ollama Python client available: ✓")
-    except ImportError:
-        logger.critical("Ollama Python client not found. This will affect embedding generation.")
-        print("❌ ERROR: Ollama client not found. Install with: pip install ollama")
-    # Check FastAPI
-    try:
-        import fastapi
-        status["fastapi"] = True
-        logger.info("FastAPI available: ✓")
-    except ImportError:
-        logger.critical("FastAPI not available. The server cannot run.")
-        print("❌ ERROR: FastAPI not found. Install with: pip install fastapi uvicorn")
-    # Check pypdf (optional)
-    try:
-        from pypdf import PdfReader
-        status["pypdf"] = True
-        logger.info("pypdf available: ✓")
-    except ImportError:
-        logger.warning("pypdf not available. PDF processing will be disabled.")
-        print("⚠️ WARNING: pypdf not found. PDF support will be disabled. Install with: pip install pypdf")
-    # Check requests
-    try:
-        import requests
-        status["requests"] = True
-        logger.info("Requests available: ✓")
-    except ImportError:
-        logger.critical("Requests not available. API connectivity will be affected.")
-        print("❌ ERROR: Requests not found. Install with: pip install requests")
+ollama_client: Optional[OpenAI] = None
+chroma_client: Optional[chromadb.ClientAPI] = None
+chroma_collection: Optional[chromadb.api.models.Collection.Collection] = None
+ollama_ef: Optional[embedding_functions.OllamaEmbeddingFunction] = None
 
-    # +++ LangChain Integration: Check +++
-    try:
-        import langchain
-        status["langchain"] = True
-        logger.info("LangChain available: ✓")
-    except ImportError:
-        logger.critical("LangChain not available. Conversation memory will not work.")
-        print("❌ ERROR: LangChain not found. Install with: pip install langchain")
-    # +++++++++++++++++++++++++++++++++++
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
+    global ollama_client, chroma_client, chroma_collection, ollama_ef
+    logger.info("--- Lifespan Startup: Initiated ---")
 
-    return status
+    common_utils.initialize_vault_directory(CONFIG)
+    logger.info("Vault directory initialized via common_utils.")
 
-# Add this function for Ollama connectivity testing
-def check_ollama_server() -> Tuple[bool, str, List[str]]:
-    """Checks Ollama server connectivity and available models."""
-    ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-    logger.info(f"Checking Ollama server at {ollama_host}")
+    ollama_client = common_utils.init_ollama_client(CONFIG, DEPENDENCY_STATUS)
+    if ollama_client: logger.info("Ollama client (OpenAI compatible) initialized successfully via lifespan.")
+    else: logger.error("CRITICAL: Failed to initialize Ollama client via lifespan.")
 
     try:
-        # Use direct API call instead of ollama client for consistent behavior
-        response = requests.get(f"{ollama_host}/api/tags", timeout=5)
-        if response.status_code != 200:
-            error_msg = f"Failed to get models: HTTP {response.status_code}"
-            logger.error(error_msg)
-            return False, error_msg, []
-
-        models_data = response.json()
+        logger.info("Lifespan: Initializing ChromaDB client...")
+        base_vault_dir = os.path.abspath(CONFIG["vault_directory"])
+        vector_store_subdir = CONFIG["vector_store_path"]
+        chroma_client_path = os.path.join(base_vault_dir, vector_store_subdir)
+        os.makedirs(chroma_client_path, exist_ok=True)
         
-        if models_data and "models" in models_data:
-            available_models = [model.get("name", "") for model in models_data["models"]]
-            model_base_names = set()
-            
-            for model_name in available_models:
-                base_name = model_name.split(':')[0] if ':' in model_name else model_name
-                if base_name:
-                    model_base_names.add(base_name)
-                    
-            if available_models:
-                logger.info(f"Available models: {', '.join(available_models)}")
-                return True, "Connected with models", available_models
-            else:
-                logger.warning("No models available on Ollama server")
-                return True, "Connected but no models available", []
-        else:
-            logger.warning("Unexpected model list format from Ollama server")
-            return True, "Connected (unexpected model list format)", []
+        chroma_client = chromadb.PersistentClient(path=chroma_client_path)
+        logger.info(f"Lifespan: ChromaDB PersistentClient OK. Version: {chroma_client.get_version()}")
 
-    except Exception as e:
-        error_msg = f"Error checking Ollama server: {str(e)}"
-        logger.error(error_msg)
-        return False, error_msg, []
-
-# Initialize Ollama API client
-def init_ollama_client():
-    """Initializes the OpenAI-compatible client to interact with the local Ollama server."""
-    try:
-        # Check if OpenAI client is importable
-        import openai
-        from openai import OpenAI
-    except ImportError as e:
-        logger.critical(f"Missing required module for Ollama client: {str(e)}")
-        print(f"❌ ERROR: Cannot initialize Ollama client - missing module: {str(e)}")
-        return None
-
-    # Check if server is running
-    server_available, message, available_models = check_ollama_server()
-    if not server_available:
-        logger.critical(f"Ollama server not available: {message}")
-        print(f"❌ ERROR: Ollama server not available - {message}")
-        print("ℹ️ Make sure Ollama is running with: ollama serve")
-        return None
-        
-    # Now try to initialize the client with better error handling
-    try:
-        # Try using the OpenAI client with V1 endpoint
-        client = OpenAI(
-            base_url='http://localhost:11434/v1',
-            api_key='ollama' # Required by OpenAI client, but Ollama ignores it
+        ollama_ef_url = os.environ.get("OLLAMA_HOST", "http://localhost:11434") + "/api/embeddings"
+        ollama_ef = embedding_functions.OllamaEmbeddingFunction(
+            url=ollama_ef_url, model_name=CONFIG["ollama_embedding_model"]
         )
-        
-        # Check if the configured models are available
-        if available_models:
-            # Check if the configured models are available using base names
-            missing_models = []
-            ollama_base_model = CONFIG["ollama_model"].split(':')[0]
-            embed_base_model = CONFIG["ollama_embedding_model"].split(':')[0]
-            
-            # Create set of base model names for easier checking
-            model_base_names = set()
-            for model_name in available_models:
-                base_name = model_name.split(':')[0] if ':' in model_name else model_name
-                if base_name:
-                    model_base_names.add(base_name)
-            
-            if ollama_base_model not in model_base_names:
-                missing_models.append(CONFIG["ollama_model"])
-            if embed_base_model not in model_base_names:
-                missing_models.append(CONFIG["ollama_embedding_model"])
-                
-            if missing_models:
-                logger.warning(f"Configured models not found: {', '.join(missing_models)}")
-                print(f"⚠️ WARNING: Configured models not found: {', '.join(missing_models)}")
-                print(f"   Available models: {', '.join(available_models)}")
-                print(f"   Please run: ollama pull {' '.join(missing_models)}")
-            else:
-                logger.info(f"All required Ollama models are available")
-                print(f"✅ Required Ollama models available: {CONFIG['ollama_model']}, {CONFIG['ollama_embedding_model']}")
-        else:
-            logger.warning("No models available on Ollama server")
-            print("⚠️ WARNING: No models available on Ollama server")
-            
-        logger.info("Ollama API client initialized successfully")
-        return client
-    except Exception as e:
-        logger.error(f"Failed to initialize Ollama API client: {str(e)}")
-        logger.error(traceback.format_exc())
-        print(f"❌ ERROR: Failed to initialize Ollama client - {str(e)}")
-        return None
+        logger.info(f"Lifespan: Ollama embedding function for Chroma OK (URL: {ollama_ef_url}).")
 
-# Initialize vault directory
-def initialize_vault_directory():
-    """Creates the vault directory structure if it doesn't exist."""
-    # Create vault directory if it doesn't exist
-    os.makedirs(CONFIG["vault_directory"], exist_ok=True)
-    metadata_path = os.path.join(CONFIG["vault_directory"], CONFIG["vault_metadata"])
-    if not os.path.exists(metadata_path):
-        try:
-            with open(metadata_path, "w", encoding="utf-8") as f:
-                json.dump({"files": []}, f, indent=2) # Add indent for readability
-            logger.info("Created vault metadata file")
-        except IOError as e:
-            logger.error(f"Failed to create vault metadata file {metadata_path}: {e}")
-
-# Initialize chat history directory
-def initialize_chat_history_directory():
-    """Creates the chat history directory if it doesn't exist."""
-    os.makedirs(CONFIG["chat_history_directory"], exist_ok=True)
-    logger.info("Chat history directory initialized")
-
-# Initialize the global Ollama client
-ollama_client = init_ollama_client()
-
-# Initialize CHAT_HISTORY to store in-memory chat sessions
-CHAT_HISTORY = {}
-
-# Function to read vault content
-def read_vault_content(selected_files: List[str] = None) -> Dict[str, List[str]]:
-    """Reads pre-processed content chunks from selected vault files."""
-    content_by_file = {}
-    if not selected_files:
-        logger.warning("read_vault_content called with no selected files.")
-        return content_by_file # Return empty if no files selected
-
-    # Read content from each selected file
-    for filename in selected_files:
-        # Basic check to prevent directory traversal
-        if ".." in filename or filename.startswith("/"):
-             logger.warning(f"Skipping potentially unsafe filename: {filename}")
-             continue
-
-        file_path = os.path.join(CONFIG["vault_directory"], filename)
-        if not os.path.exists(file_path):
-            logging.warning(f"Selected file not found, skipping: {filename}")
-            continue
-        try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                # Read lines, assuming each line is a pre-chunked piece of text
-                chunks = [line for line in f.read().splitlines() if line.strip()] # Simple split by line
-                if chunks:
-                    content_by_file[filename] = chunks
-                    logging.debug(f"Read {len(chunks)} pre-processed chunks from {filename}") # Changed to debug
-                else:
-                    logging.warning(f"No content chunks found in file: {filename}")
-        except Exception as e:
-            logging.error(f"Error reading file {filename}: {e}")
-
-    return content_by_file
-
-# Generate embeddings for vault content using Ollama
-async def generate_vault_embeddings(content_by_file: Dict[str, List[str]]) -> Dict[str, torch.Tensor]: # Removed client_id
-    """Generates embeddings for each file's content chunks with GPU acceleration if available."""
-    embeddings_by_file = {}
-    total_files = len(content_by_file)
-    processed_files = 0
-    device = CONFIG.get("device", torch.device("cpu")) # Use configured device
-
-    for filename, chunks in content_by_file.items():
-        processed_files += 1
-        if not chunks:
-            logger.info(f"No content chunks in {filename}, skipping embeddings generation.")
-            continue
-
-        logger.info(f"Generating embeddings for {len(chunks)} chunks in {filename} ({processed_files}/{total_files})...")
-        # status_message_start = f"Generating embeddings for {filename} ({processed_files}/{total_files})..." # Removed status message
-        # if client_id: await manager.send_json(client_id, {"type": "status", "message": status_message_start}) # Removed manager call
-
-        file_embeddings = []
-        count = 0
-        total_chunks = len(chunks)
-        start_time = time.time()
-        try:
-            # Process chunks in batches to avoid too many concurrent tasks
-            batch_size = 10  # Process 10 chunks at a time
-            for batch_start in range(0, len(chunks), batch_size):
-                batch_end = min(batch_start + batch_size, len(chunks))
-                batch_chunks = chunks[batch_start:batch_end]
-
-                # Create tasks for each chunk in batch
-                embedding_tasks = []
-                for chunk in batch_chunks:
-                    if chunk.strip():
-                        # Run embedding in thread pool to avoid blocking
-                        embedding_tasks.append(
-                            asyncio.to_thread(
-                                lambda text=chunk.strip(): ollama.embeddings(
-                                    model=CONFIG["ollama_embedding_model"],
-                                    prompt=text
-                                )
-                            )
-                        )
-
-                # Run all batch tasks concurrently and gather results
-                batch_results = await asyncio.gather(*embedding_tasks, return_exceptions=True)
-
-                # Process batch results
-                for result in batch_results:
-                    if isinstance(result, Exception):
-                        logger.error(f"Error generating embedding: {str(result)}")
-                        continue # Skip failed chunks
-
-                    if "embedding" in result:
-                        file_embeddings.append(result["embedding"])
-                        count += 1
-                    else:
-                        logger.warning(f"Ollama embedding response missing 'embedding' key: {result}")
-
-
-                # Update progress after each batch
-                if count % 50 == 0 or count == total_chunks:
-                    elapsed_time = time.time() - start_time
-                    progress = f"({count}/{total_chunks} chunks, {elapsed_time:.1f}s)"
-                    logger.info(f"...processed {progress} for {filename}.")
-                    # status_message_progress = f"{status_message_start} {progress}" # Removed status message
-                    # if client_id: # Removed manager call
-                    #     await manager.send_json(client_id, {"type": "status", "message": status_message_progress})
-
-            # Create tensor from embeddings with device awareness
-            if file_embeddings:
-                try:
-                    # Ensure embeddings are valid before tensor creation
-                    if all(isinstance(e, list) for e in file_embeddings):
-                        embeddings_tensor = torch.tensor(file_embeddings, dtype=torch.float32)
-                        # Move to appropriate device (GPU if available)
-                        embeddings_tensor = embeddings_tensor.to(device)
-                        embeddings_by_file[filename] = embeddings_tensor
-                        logger.info(f"Generated tensor of shape {embeddings_by_file[filename].shape} for {filename} on device {device}")
-                    else:
-                         logger.error(f"Invalid embedding data type for tensor creation in {filename}.")
-
-                except Exception as e:
-                    logger.error(f"Error converting embeddings to tensor for {filename}: {str(e)}")
-                    logger.error(traceback.format_exc()) # Log full traceback for tensor errors
-            else:
-                logger.warning(f"No embeddings were generated for {filename} (all chunks might have failed or were empty).")
-
-        except Exception as e:
-             logger.error(f"Unexpected error during embedding generation for {filename}: {str(e)}")
-             logger.error(traceback.format_exc())
-             # Continue to the next file
-
-    logger.info("Finished generating embeddings for all selected files.")
-    # if client_id: await manager.send_json(client_id, {"type": "status", "message": "Embedding generation complete."}) # Removed manager call
-    return embeddings_by_file
-
-
-# Text processing functions
-def preprocess_document(text: str) -> str:
-    """Preprocess document text to improve chunking quality"""
-    # Fix section numbers running into text (like "5.2LED Information")
-    text = re.sub(r'(\d+\.\d+)(\w)', r'\1 \2', text)
-
-    # Add space after periods followed immediately by uppercase letters
-    text = re.sub(r'\.([A-Z])', r'. \1', text)
-
-    # Ensure section headers stand out (like V3 exactly)
-    text = re.sub(r'(\d+(\.\d+)*)\s+([A-Za-z])', r'\n\1 \3', text)  # Preserves section headers
-    # Normalize whitespace but preserve paragraph breaks
-    text = re.sub(r'\s*\n\s*\n\s*', '\n\n', text)
-    text = re.sub(r'\s+', ' ', text)
-
-    return text.strip()
-
-def chunk_text(text: str, max_chunk_size: int = 800, overlap: int = 0, paragraph_separator: str = "\n\n") -> List[str]:
-    """
-    Splits text into chunks, preserving semantic structure where possible.
+        collection_name = CONFIG["vector_collection_name"]
+        chroma_collection = chroma_client.get_or_create_collection(
+            name=collection_name, embedding_function=ollama_ef
+        )
+        logger.info(f"Lifespan: ChromaDB collection '{chroma_collection.name}' (ID: {chroma_collection.id}) obtained/created. Count: {chroma_collection.count()}")
+        if chroma_collection is None: logger.error("CRITICAL LIFESPAN ERROR: chroma_collection is None!")
+        else: logger.info("SUCCESS LIFESPAN: chroma_collection assigned.")
+    except Exception as e_chroma_ls:
+        logger.error(f"CRITICAL LIFESPAN ERROR during ChromaDB setup: {e_chroma_ls}", exc_info=True)
+        chroma_client = ollama_ef = chroma_collection = None
     
-    Args:
-        text: The text to chunk
-        max_chunk_size: Maximum size of each chunk (default: 800)
-        overlap: Number of characters to overlap between chunks (default: 0)
-        paragraph_separator: String used to separate paragraphs (default: "\n\n")
-    
-    Returns:
-        List of text chunks
-    """
-    # First, try to split by double newlines (paragraph boundaries) or the specified separator
-    paragraphs = re.split(r'\n\s*\n' if paragraph_separator == "\n\n" else re.escape(paragraph_separator), text)
-    chunks = []
-    current_chunk = ""
+    logger.info("--- Lifespan Startup: Yielding to Application ---")
+    yield
+    logger.info("--- Lifespan Shutdown: Initiated ---")
+    logger.info("--- Lifespan Shutdown: Complete ---")
 
-    # Process each paragraph - exactly like V3
-    for paragraph in paragraphs:
-        paragraph = paragraph.strip()
-        if not paragraph:
-            continue
+app = FastAPI(
+    title="Chatbot API",
+    description="Toggle-based Visual and Textual RAG Chatbot API",
+    lifespan=lifespan
+)
 
-        # Check if adding this paragraph exceeds the max size
-        if len(current_chunk) + len(paragraph) + 2 <= max_chunk_size:
-            # Add paragraph to current chunk
-            if current_chunk:
-                current_chunk += "\n\n" + paragraph
-            else:
-                current_chunk = paragraph
-        else:
-            # If current chunk is not empty, add it to chunks
-            if current_chunk:
-                chunks.append(current_chunk)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
 
-            # If paragraph itself is larger than max size, we need to split it
-            if len(paragraph) > max_chunk_size:
-                # Try to split by sentence boundaries first
-                sentences = re.split(r'(?<=[.!?])\s*', paragraph)
-                current_chunk = ""
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, WebSocket] = {}
+        self.client_file_selections: Dict[str, List[str]] = {}
+        self.client_embeddings: Dict[str, Dict[str, torch.Tensor]] = {}
+        self.client_content: Dict[str, Dict[str, List[str]]] = {}
+        self.client_memory: Dict[str, ConversationBufferMemory] = {}
 
-                for sentence in sentences:
-                    if not sentence.strip():
-                        continue
+    async def connect(self, websocket: WebSocket, client_id: str):
+        await websocket.accept()
+        self.active_connections[client_id] = websocket
+        self.client_file_selections[client_id] = []
+        self.client_embeddings[client_id] = {}
+        self.client_content[client_id] = {}
+        self.client_memory[client_id] = ConversationBufferMemory(memory_key="history", return_messages=True)
+        logger.info(f"Client connected & session initialized: {client_id}")
 
-                    if len(current_chunk) + len(sentence) + 1 <= max_chunk_size:
-                        if current_chunk:
-                            current_chunk += " " + sentence
-                        else:
-                            current_chunk = sentence
-                    else:
-                        if current_chunk:
-                            chunks.append(current_chunk)
+    def disconnect(self, client_id: str):
+        self.active_connections.pop(client_id, None)
+        self.client_file_selections.pop(client_id, None)
+        self.client_embeddings.pop(client_id, None)
+        self.client_content.pop(client_id, None)
+        self.client_memory.pop(client_id, None)
+        logger.info(f"Client disconnected & session cleaned: {client_id}")
 
-                        # If single sentence exceeds max size, hard split it
-                        if len(sentence) > max_chunk_size:
-                            # Attempt to split on word boundaries when possible
-                            words = sentence.split()
-                            temp_chunk = ""
-
-                            for word in words:
-                                if len(temp_chunk) + len(word) + 1 <= max_chunk_size:
-                                    if temp_chunk:
-                                        temp_chunk += " " + word
-                                    else:
-                                        temp_chunk = word
-                                else:
-                                    chunks.append(temp_chunk)
-                                    temp_chunk = word
-
-                            if temp_chunk:
-                                current_chunk = temp_chunk
-                            else:
-                                current_chunk = ""
-                        else:
-                            current_chunk = sentence
-            else:
-                # Start fresh with this paragraph
-                current_chunk = paragraph
-
-    # Add the last chunk if not empty
-    if current_chunk:
-        chunks.append(current_chunk)
-
-    # Verify no empty chunks
-    chunks = [c.strip() for c in chunks if c.strip()]
-
-    return chunks
-
-
-# --- File Processing Logic ---
-def extract_text_from_pdf(file_path: str) -> str:
-    """Extract text content from a PDF file."""
-    if not PdfReader:
-        logger.error("PDF processing requires 'pypdf'. Please install it.")
-        return ""
-
-    try:
-        reader = PdfReader(file_path)
-        text = ""
-
-        for i, page in enumerate(reader.pages):
+    async def send_json(self, client_id: str, data: dict):
+        websocket = self.active_connections.get(client_id)
+        if websocket and websocket.client_state == WebSocketState.CONNECTED:
             try:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + " "  # Add space between pages
-            except Exception as page_e:
-                logger.warning(f"Could not extract text from page {i+1} of PDF: {page_e}")
-
-        return text
-    except Exception as e:
-        logger.error(f"Error extracting text from PDF {file_path}: {str(e)}")
-        return ""
-
-async def process_uploaded_file(temp_file_path, file_type, uploaded_filename, description=None):
-    """Process the uploaded file to match V3's file processing EXACTLY."""
-    try:
-        # Initialize tags variable at the function start
-        tags = []
-
-        # Ensure vault directory exists
-        os.makedirs(CONFIG["vault_directory"], exist_ok=True)
-
-        # Read content based on file type
-        if (file_type.lower() == "pdf" and PdfReader):
-            content = extract_text_from_pdf(temp_file_path)
-            if not content:
-                logger.error(f"Failed to extract text from PDF: {uploaded_filename}")
-                return False, None
-            logger.info(f"Successfully extracted text from PDF: {uploaded_filename}")
-        elif file_type.lower() in ["txt", "md", "json", "py", "js", "html", "css", "csv"]: # Handle common text types
-            try:
-                with open(temp_file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    content = f.read()
-                logger.info(f"Successfully read text file content: {len(content)} bytes")
+                await websocket.send_json(data)
             except Exception as e:
-                logger.error(f"Error reading text file {uploaded_filename}: {str(e)}")
-                return False, None
-        else:
-             logger.warning(f"Unsupported file type '{file_type}' for direct text reading: {uploaded_filename}. Treating as generic.")
-             # Fallback: try reading as binary and decoding with ignore
-             try:
-                with open(temp_file_path, "rb") as f:
-                    raw_content = f.read()
-                content = raw_content.decode("utf-8", errors="ignore")
-                logger.info(f"Read unsupported file type as text (with potential decoding errors): {len(content)} bytes")
-             except Exception as e:
-                logger.error(f"Error reading generic file {uploaded_filename}: {str(e)}")
-                return False, None
-
-
-        # Generate a unique filename
-        safe_filename = f"{int(time.time())}_{re.sub(r'[^\w\.-]', '_', uploaded_filename)}"
-        output_path = os.path.join(CONFIG["vault_directory"], safe_filename)
-
-        # Log the raw content length for debugging
-        logger.debug(f"Raw content length before preprocessing: {len(content)} chars")
-
-        # Preprocess and chunk the text EXACTLY like V3
-        processed_text = preprocess_document(content)
-        logger.debug(f"Processed text length: {len(processed_text)} chars")
-
-        # Use exactly the same chunk_text function as V3 with same parameters
-        chunks = chunk_text(processed_text, max_chunk_size=800, overlap=0)  # V3 uses 800 as max size
-        logger.info(f"Created {len(chunks)} chunks for {safe_filename}")
-
-        # Save the chunked text exactly like V3 does
-        with open(output_path, "w", encoding="utf-8") as f:
-            for chunk in chunks:
-                f.write(chunk + "\n")
-
-        # Default description if none provided (AI generation happens later if needed)
-        if description is None:
-            description = f"Uploaded {file_type.upper()} file: {uploaded_filename}"
-
-        # Add file to metadata (AI generation happens in the /upload endpoint)
-        if not add_file_to_vault(safe_filename, description, tags):  # Pass initial empty tags
-            logger.error(f"Failed to update metadata for {safe_filename}")
-            return False, None
-
-        # Note: Summary generation is triggered from the /upload endpoint AFTER AI metadata generation
-
-        return True, safe_filename
-    except Exception as e:
-        logger.error(f"Error processing uploaded file: {str(e)}")
-        logger.error(traceback.format_exc())
-        return False, None
-
-
-async def generate_file_metadata(file_content: str, client: OpenAI) -> Tuple[Optional[str], List[str]]:
-    """Uses the AI model to generate a description and keywords for a file based on its content."""
-    if not client:
-        logger.warning("Ollama client not available for metadata generation.")
-        return None, []
-    try:
-        # Truncate content if too long to avoid token limits (match V3 exactly)
-        sample_content = file_content[:10000] if len(file_content) > 10000 else file_content
-        if not sample_content.strip():
-            logger.warning("File content is empty or whitespace, cannot generate metadata.")
-            return "File is empty or contains only whitespace.", []
-
-        # Use EXACTLY the same prompt as Chatbot_V3.py
-        prompt = f"""Analyze the following document content and provide:
-1. A concise description (1-2 sentences) summarizing what this document is about.
-2. 3-7 relevant keywords or tags (comma-separated).
-
-Content:
-{sample_content}
-
-Respond ONLY in this exact format, with no extra text before or after:
-DESCRIPTION: ** [your generated description]
-KEYWORDS: ** [keyword1, keyword2, keyword3, ...]"""
-
-        # Use system message exactly like V3
-        response = await asyncio.to_thread( # Use thread to avoid blocking API call
-            lambda: client.chat.completions.create(
-                model=CONFIG["ollama_model"],
-                messages=[{"role": "system", "content": prompt}],
-                temperature=0.1 # Low temperature for factual description
-            )
-        )
-
-        result = response.choices[0].message.content
-        logger.info(f"AI metadata generation response: {result[:100]}...")
-
-        # Parse the response using exact pattern from V3
-        description = None # Default to None if not found
-        keywords = []
-
-        desc_match = re.search(r'DESCRIPTION:\s*\*\*\s*(.*?)(?:\nKEYWORDS:|\Z)', result, re.DOTALL | re.IGNORECASE)
-        if desc_match:
-            description = desc_match.group(1).strip()
-            # Handle potential leading/trailing noise if KEYWORDS wasn't perfectly matched
-            description = description.split('KEYWORDS:')[0].strip()
-
-
-        keywords_match = re.search(r'KEYWORDS:\s*\*\*\s*(.*?)(?:\n|$)', result, re.DOTALL | re.IGNORECASE)
-        if keywords_match:
-            keywords_text = keywords_match.group(1).strip()
-            keywords = [k.strip() for k in keywords_text.split(',') if k.strip()]
-
-        if not description and not keywords:
-             logger.warning(f"Could not parse DESCRIPTION or KEYWORDS from AI response: {result}")
-             return f"AI failed to parse description.", []
-
-
-        return description, keywords
-    except Exception as e:
-        logger.error(f"Error generating file metadata: {str(e)}")
-        logger.error(traceback.format_exc())
-        return f"Error during AI metadata generation: {str(e)}", []
-
-
-async def generate_summary_on_upload(filename: str): # Removed client_id
-    """Generates a summary for a newly uploaded file."""
-    try:
-        if not ollama_client:
-            logger.warning(f"Cannot generate summary for {filename}, Ollama client not available.")
-            return None
-
-        # Get file content
-        content_by_file = read_vault_content([filename])
-        if not content_by_file or filename not in content_by_file:
-            logger.error(f"Failed to read content for summary: {filename}")
-            return None
-
-        # Check if content is meaningful
-        if not any(chunk.strip() for chunk in content_by_file[filename]):
-            logger.warning(f"Skipping summary generation for {filename}, content is empty or whitespace.")
-            update_file_metadata(filename, description="File content appears empty.")
-            return None
-
-        # Generate embeddings (needed for context selection, even for summary)
-        embeddings_by_file = await generate_vault_embeddings(content_by_file) # Removed client_id
-        if not embeddings_by_file:
-            logger.warning(f"Failed to generate embeddings for {filename}, cannot generate summary.")
-            return None
-
-        # Generate summary
-        logger.info(f"Generating automatic summary for uploaded file: {filename}")
-
-        # Use a simplified client ID if none provided, append timestamp
-        summary_client_id = f"auto_summary_{filename}_{int(time.time())}" # Use filename for more specific ID
-
-        # Trigger summary generation
-        # Note: We pass the client_id so status updates can be sent if a user is connected
-        summary = await ollama_chat_multifile_async(
-            user_input="FORCE_SUMMARY_GENERATION", # Use the special trigger
-            selected_files=[filename],
-            embeddings_by_file=embeddings_by_file,
-            content_by_file=content_by_file,
-            client_id=summary_client_id, 
-            force_summary=True # Explicitly force summary mode
-        )
-
-        # Store the summary in file metadata if generated
-        if summary and "error" not in summary.lower() and "i cannot" not in summary.lower():
-            # Extract a short description from the summary
-            short_desc = ""
-            # Try finding the first heading
-            match = re.search(r'<h[2-6]>(.*?)</h[2-6]>', summary, re.IGNORECASE | re.DOTALL)
-            if match:
-                short_desc = match.group(1).strip()
-                # Clean potential residual HTML within the heading
-                short_desc = re.sub(r'<.*?>', '', short_desc)
-                short_desc = short_desc[:250] + ("..." if len(short_desc) > 250 else "") 
-
-
-            if not short_desc:
-                # Fall back to first 200 chars without HTML
-                clean_summary = re.sub(r'<.*?>', '', summary).strip()
-                # Take first few sentences or up to 250 chars
-                sentences = re.split(r'(?<=[.!?])\s+', clean_summary)
-                short_desc = ""
-                char_count = 0
-                for s in sentences:
-                    if char_count + len(s) < 250:
-                        short_desc += s + " "
-                        char_count += len(s) + 1
-                    else:
-                        break
-                short_desc = short_desc.strip()
-                if len(clean_summary) > len(short_desc):
-                    short_desc += "..."
-
-
-            if not short_desc: # Ultimate fallback
-                 short_desc = f"Summary generated for {filename}"
-
-            # Update metadata with summary info, keep existing tags if possible
-            existing_meta = get_vault_files()
-            current_tags = []
-            for f_meta in existing_meta:
-                if f_meta.get("filename") == filename:
-                    current_tags = f_meta.get("tags", [])
-                    break
-            new_tags = sorted(list(set(current_tags + ["auto-summarized"])))
-
-
-            update_file_metadata(
-                filename,
-                description=f"AUTO-SUMMARY: {short_desc}",
-                tags=new_tags
-            )
-
-            # Store full summary (optional - maybe in a separate file or DB later)
-            # For now, we just update the description.
-            logger.info(f"Auto-summary generated and description updated for {filename}")
-
-            # If client_id was provided and they are connected, send the summary
-            # This part is removed as manager and WebSocket connections are gone.
-            # if client_id and client_id in manager.active_connections:
-            #     await manager.send_json(client_id, {
-            #         "type": "file_summary",
-            #         "filename": filename,
-            #         "summary": summary # Send the full HTML summary
-            #     })
-
-            return summary # Return the generated summary text
-        else:
-            logger.warning(f"Auto-summary generation for {filename} did not produce a valid result. Summary was: '{summary[:100]}...'")
-            update_file_metadata(filename, description="Summary generation failed or yielded no result.")
-            return None
-
-    except Exception as e:
-        logger.error(f"Error generating auto-summary for {filename}: {str(e)}")
-        logger.error(traceback.format_exc())
-        return None
-
-
-# Duplicated function, ensure only one remains or they are distinct. Assuming this is a duplicate to be removed or was an alternative version.
-# async def generate_summary_on_upload(filename: str, client_id: str = None):
-#     """Generates a summary for a newly uploaded file."""
-#     try:
-#         # Get file content
-#         content_by_file = read_vault_content([filename])
-#         if not content_by_file:
-#             logger.error(f"Failed to read content for summary: {filename}")
-#             return
-            
-#         # Generate embeddings
-#         embeddings_by_file = await generate_vault_embeddings(content_by_file)
-        
-#         # Generate summary
-#         logger.info(f"Generating automatic summary for uploaded file: {filename}")
-        
-#         # Use a simplified client ID if none provided
-#         summary_client_id = client_id or f"auto_summary_{int(time.time())}"
-        
-#         # Force summary generation with standard settings
-#         summary = await ollama_chat_multifile_async(
-#             user_input="Generate a comprehensive summary of the document",
-#             selected_files=[filename],
-#             embeddings_by_file=embeddings_by_file,
-#             content_by_file=content_by_file,
-#             client_id=summary_client_id,
-#             force_summary=True  # Force summary mode
-#         )
-        
-#         # Store the summary in file metadata
-#         if summary:
-#             # Extract a short description from the summary (first 200 chars or first heading content)
-#             short_desc = ""
-#             if "<h2>" in summary:
-#                 match = re.search(r'<h2>(.*?)</h2>', summary)
-#                 if match:
-#                     short_desc = match.group(1)
-            
-#             if not short_desc:
-#                 # Fall back to first 200 chars without HTML
-#                 clean_summary = re.sub(r'<.*?>', '', summary).strip()
-#                 short_desc = clean_summary[:200] + ("..." if len(clean_summary) > 200 else "")
-            
-#             # Update metadata with summary data
-#             update_file_metadata(
-#                 filename, 
-#                 description=f"AUTO-SUMMARY: {short_desc}",
-#                 tags=["auto-summarized"]  # Add a tag to indicate auto-summarization
-#             )
-            
-#             # Store full summary in a separate metadata field or file if needed
-#             # This would require extending your metadata structure
-            
-#             logger.info(f"Auto-summary generated for {filename}")
-            
-#             # If client_id was provided, send the summary to the client
-#             if client_id and client_id in manager.active_connections: # This part would be removed
-#                 await manager.send_json(client_id, {
-#                     "type": "file_summary",
-#                     "filename": filename,
-#                     "summary": summary
-#                 })
-                
-#         return summary
-#     except Exception as e:
-#         logger.error(f"Error generating auto-summary for {filename}: {str(e)}")
-#         logger.error(traceback.format_exc())
-#         return None
-
-# --- End File Processing ---
-
-async def generate_document_questions(document_content: str, filename: str, client: OpenAI) -> List[Dict]:
-    """Generates suggested questions for a document using the AI model."""
-    if not client:
-        logger.warning("Ollama client not available for question generation.")
-        return []
+                logger.error(f"Error sending JSON to {client_id}: {e}")
+                self.disconnect(client_id)
     
-    try:
-        # Truncate content if too long to avoid token limits
-        sample_content = document_content[:8000] if len(document_content) > 8000 else document_content
-        if not sample_content.strip():
-            logger.warning(f"File content is empty or whitespace for {filename}, cannot generate questions.")
-            return []
+    def set_client_files(self, client_id: str, files: List[str]):
+        self.client_file_selections[client_id] = files
+    def get_client_files(self, client_id: str) -> List[str]:
+        return self.client_file_selections.get(client_id, [])
+    def set_client_embeddings(self, client_id: str, embeddings: Dict[str, torch.Tensor]):
+        self.client_embeddings[client_id] = embeddings
+    def get_client_embeddings(self, client_id: str) -> Dict[str, torch.Tensor]:
+        return self.client_embeddings.get(client_id, {})
+    def set_client_content(self, client_id: str, content: Dict[str, List[str]]):
+        self.client_content[client_id] = content
+    def get_client_content(self, client_id: str) -> Dict[str, List[str]]:
+        return self.client_content.get(client_id, {})
+    def get_client_memory(self, client_id: str) -> Optional[ConversationBufferMemory]:
+        return self.client_memory.get(client_id)
+    def cleanup_file_data(self, filename_is_doc_id: str):
+        for client_id in list(self.active_connections.keys()):
+            if filename_is_doc_id in self.client_file_selections.get(client_id, []):
+                self.client_file_selections[client_id].remove(filename_is_doc_id)
+            self.client_embeddings.get(client_id, {}).pop(filename_is_doc_id, None)
+            self.client_content.get(client_id, {}).pop(filename_is_doc_id, None)
 
-        # Create a prompt for question generation
-        prompt = f"""Based on the following document content, generate 5 relevant and specific questions that a user might ask about this document.
-        
-Document: {filename}
-Content:
-{sample_content}
+manager = ConnectionManager()
 
-Generate 5 questions in JSON format as follows:
-[
-  {{"question": "Question 1 about specific content?"}},
-  {{"question": "Question 2 about another specific detail?"}},
-  ...
-]
+class FileSelection(BaseModel):
+    files: List[str]
+    client_id: Optional[str] = None
+class ChatMessageModel(BaseModel):
+    message: str
+    client_id: Optional[str] = None
 
-Important: Make questions specific to the actual document content, not generic.
-Only return the JSON array, with no additional text."""
+async def orchestrate_file_processing(
+    config_dict: Dict,
+    temp_file_path: str,
+    original_filename: str,
+    file_extension: str,
+    user_description: Optional[str],
+    pipeline_preference: str
+) -> Tuple[bool, Optional[str], str]:
+    logger.info(f"Orchestrating processing for '{original_filename}' (ext: '.{file_extension}') as '{pipeline_preference}' pipeline.")
+    doc_id = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
+    logger.info(f"Generated doc_id: {doc_id} for '{original_filename}'")
 
-        # Call the Ollama API
-        response = await asyncio.to_thread(
-            lambda: client.chat.completions.create(
-                model=CONFIG["ollama_model"],
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that generates relevant questions about documents."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7  # Slightly higher temperature for creative questions
-            )
-        )
+    metadata_tags = [file_extension.lower()]
+    processed_path_for_meta = ""
+    initial_step_success = False
+    msg_pipeline_step = ""
+    page_count_val = 0 # Initialize page count
 
-        result = response.choices[0].message.content
-        logger.info(f"AI question generation response: {result[:100]}...")
-
-        # Try to parse the JSON response
-        try:
-            # Look for a JSON array in the response
-            json_match = re.search(r'\[\s*\{.*\}\s*\]', result, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(0)
-                questions = json.loads(json_str)
-                # Ensure proper format of questions
-                validated_questions = []
-                for item in questions:
-                    if isinstance(item, dict) and "question" in item:
-                        validated_questions.append({"question": item["question"]})
-                return validated_questions
-            else:
-                # Try to parse the whole response as JSON
-                questions = json.loads(result)
-                validated_questions = []
-                for item in questions:
-                    if isinstance(item, dict) and "question" in item:
-                        validated_questions.append({"question": item["question"]})
-                return validated_questions
-        except json.JSONDecodeError:
-            # If JSON parsing fails, try to extract questions with regex
-            questions = []
-            question_patterns = [
-                r'"question":\s*"([^"]*?)"',  # Match "question": "text" with non-greedy matching
-                r'\d+\.\s+([^?]+\?)',  # Match numbered lists with question marks: 1. Question text?
-                r'\d+\)\s+([^?]+\?)',  # Match numbered lists with parentheses: 1) Question text?
-                r'"([^"]+\?)"',  # Match quoted questions with question marks
-                r'[\n\r]\s*([^"\n\r][^?\n\r]*\?)'  # Match standalone questions with question marks
-            ]
-            
-            for pattern in question_patterns:
-                matches = re.findall(pattern, result, re.DOTALL)
-                if matches:
-                    for match in matches[:5]:  # Limit to 5 questions
-                        question_text = match.strip()
-                        if question_text and len(question_text) > 10:  # Basic validation for question length
-                            questions.append({"question": question_text})
-                    if questions:  # Only break if we found valid questions
-                        break  # Stop if we found questions with this pattern
-            
-            if questions:
-                return questions
-            
-            # Last resort: split by newlines and look for question marks
-            lines = result.split('\n')
-            for line in lines:
-                line = line.strip()
-                if '?' in line and len(line) > 15:  # Basic validation
-                    # Extract just the question part
-                    question_part = re.sub(r'^\d+[\.\)]\s*', '', line)  # Remove leading numbers
-                    question_part = re.sub(r'^["\']*|["\']*$', '', question_part)  # Remove quotes
-                    if question_part and "question" not in question_part.lower()[:15]:  # Avoid matching JSON fragments
-                        questions.append({"question": question_part})
-            
-            return questions[:5]  # Return up to 5 questions
-    except Exception as e:
-        logger.error(f"Error generating questions for {filename}: {str(e)}")
-        logger.error(traceback.format_exc())
-        return []
-
-# File management functions
-def get_vault_files() -> List[Dict]:
-    """Returns metadata for all available files in the vault."""
-    try:
-        metadata_path = os.path.join(CONFIG["vault_directory"], CONFIG["vault_metadata"])
-        if not os.path.exists(metadata_path):
-            logger.warning(f"Metadata file not found: {metadata_path}")
-            return []
-
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            metadata = json.load(f)
-
-        if not isinstance(metadata, dict) or "files" not in metadata:
-            logger.warning(f"Invalid metadata format in {metadata_path}")
-            # Attempt to fix by creating a valid structure
-            metadata = {"files": []}
-            try:
-                with open(metadata_path, "w", encoding="utf-8") as f:
-                    json.dump(metadata, f, indent=2)
-                logger.info(f"Created valid metadata structure in {metadata_path}")
-            except IOError as e_fix:
-                logger.error(f"Failed to fix metadata file {metadata_path}: {e_fix}")
-                return []
-
-
-        # Filter for files that actually exist on disk
-        files_with_metadata = []
-        valid_files_in_metadata = []
-        needs_update = False
-        for file_entry in metadata.get("files", []):
-            if not isinstance(file_entry, dict) or "filename" not in file_entry:
-                logger.warning(f"Skipping invalid entry in metadata: {file_entry}")
-                needs_update = True
-                continue
-
-            filename = file_entry.get("filename")
-            if not filename: # Skip entries with empty filenames
-                 logger.warning(f"Skipping metadata entry with empty filename.")
-                 needs_update = True
-                 continue
-
-            file_path = os.path.join(CONFIG["vault_directory"], filename)
-
-            if os.path.exists(file_path):
-                # Ensure basic fields exist
-                file_entry.setdefault("description", f"File: {filename}")
-                file_entry.setdefault("tags", [])
-                file_entry.setdefault("added_date", time.strftime("%Y-%m-%d %H:%M:%S"))
-                file_entry.setdefault("updated_date", file_entry["added_date"])
-                files_with_metadata.append(file_entry)
-                valid_files_in_metadata.append(file_entry) # Keep track of valid ones separately
-            else:
-                logger.warning(f"File in metadata not found on disk, removing entry: {filename}")
-                needs_update = True # Mark metadata for update
-
-        # If we detected missing files or invalid entries, update the metadata file
-        if needs_update:
-            logger.info("Updating metadata file to remove missing files/invalid entries...")
-            updated_metadata = {"files": valid_files_in_metadata}
-            try:
-                with open(metadata_path, "w", encoding="utf-8") as f:
-                    json.dump(updated_metadata, f, indent=2)
-                logger.info("Metadata file updated successfully.")
-            except IOError as e_write:
-                logger.error(f"Failed to write updated metadata file {metadata_path}: {e_write}")
-                # Return the list based on disk check, even if metadata update failed
-                return files_with_metadata
-
-
-        # Sort files by added date descending (newest first)
-        files_with_metadata.sort(key=lambda x: x.get("added_date", "1970-01-01 00:00:00"), reverse=True)
-
-        return files_with_metadata
-
-    except json.JSONDecodeError:
-        logger.error(f"Error parsing metadata file: {metadata_path}. Attempting to reset.")
-        try:
-             with open(metadata_path, "w", encoding="utf-8") as f:
-                 json.dump({"files": []}, f, indent=2)
-             logger.info("Metadata file was corrupted and has been reset.")
-             return []
-        except IOError as e_reset:
-             logger.error(f"Failed to reset corrupted metadata file {metadata_path}: {e_reset}")
-             return []
-    except Exception as e:
-        logger.error(f"Error reading vault files: {str(e)}")
-        logger.error(traceback.format_exc())
-        return []
-
-
-def add_file_to_vault(filename: str, description: str, tags: List[str] = None, suggested_questions: List[Dict] = None) -> bool:
-    """Adds or updates a file entry in the vault metadata."""
-    try:
-        metadata_path = os.path.join(CONFIG["vault_directory"], CONFIG["vault_metadata"])
-        if not os.path.exists(metadata_path):
-            with open(metadata_path, "w", encoding="utf-8") as f:
-                json.dump({"files": []}, f, indent=2)
-            logger.info(f"Created metadata file: {metadata_path}")
-
-        try:
-            with open(metadata_path, "r", encoding="utf-8") as f:
-                metadata = json.load(f)
-        except json.JSONDecodeError:
-            logger.warning(f"Metadata file {metadata_path} was corrupted. Resetting.")
-            metadata = {"files": []}
-
-        if not isinstance(metadata, dict) or "files" not in metadata:
-            logger.warning("Invalid metadata format detected. Resetting structure.")
-            metadata = {"files": []}
-
-        # Standardize tags: lowercase, unique, strip whitespace
-        processed_tags = sorted(list(set([t.lower().strip() for t in tags if t and isinstance(t, str) and t.strip()]))) if tags else []
-
-        # Check if file already exists to update it, otherwise add new
-        found_index = -1
-        current_files = metadata.get("files", [])
-        for i, existing_file in enumerate(current_files):
-            if isinstance(existing_file, dict) and existing_file.get("filename") == filename:
-                found_index = i
-                break
-
-        now_time = time.strftime("%Y-%m-%d %H:%M:%S")
-
-        file_entry = {
-            "filename": filename,
-            "description": description or f"File: {filename}", # Ensure description isn't empty
-            "tags": processed_tags,
-            "added_date": now_time, # Default to now for new entries
-            "updated_date": now_time, # Always set update time
-            "suggested_questions": suggested_questions or [] # Store the AI-generated questions
-        }
-        
-        if found_index != -1:
-             # Update existing entry, preserve original added_date
-             original_added_date = current_files[found_index].get("added_date", now_time)
-             # Merge tags: Keep existing, add new, ensure uniqueness
-             existing_tags = current_files[found_index].get("tags", [])
-             merged_tags = sorted(list(set(existing_tags + processed_tags)))
-
-             file_entry["added_date"] = original_added_date
-             file_entry["tags"] = merged_tags # Use merged tags for updates
-             
-             # Only update description if a new one was provided
-             if description:
-                 file_entry["description"] = description
-             else:
-                 file_entry["description"] = current_files[found_index].get("description", f"File: {filename}")
-                 
-             # Preserve existing questions if none provided
-             if not suggested_questions and "suggested_questions" in current_files[found_index]:
-                 file_entry["suggested_questions"] = current_files[found_index]["suggested_questions"]
-
-             metadata["files"][found_index] = file_entry
-             logger.info(f"Updated metadata for existing file: {filename}")
-        else:
-            # Add new entry
-            metadata.setdefault("files", []).append(file_entry)
-            logger.info(f"Added new file to metadata: {filename}")
-        
-        # Save updated metadata
-        with open(metadata_path, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=2)
-        
-        return True
-
-    except Exception as e:
-        logger.error(f"Error adding/updating file '{filename}' in vault metadata: {str(e)}")
-        logger.error(traceback.format_exc()) # Log full traceback for debugging
-        return False
-
-
-def update_file_metadata(filename: str, description: Optional[str] = None, 
-                        tags: Optional[List[str]] = None, 
-                        suggested_questions: Optional[List[Dict]] = None) -> bool:
-    """Updates metadata for an existing file. Merges tags if provided."""
-    try:
-        metadata_path = os.path.join(CONFIG["vault_directory"], CONFIG["vault_metadata"])
-        if not os.path.exists(metadata_path):
-             logger.error(f"Metadata file not found: {metadata_path}")
-             return False # Cannot update if file doesn't exist
-
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            metadata = json.load(f)
-
-        if not isinstance(metadata, dict) or "files" not in metadata:
-             logger.error(f"Invalid metadata format in {metadata_path}")
-             return False
-
-        # Find the file in metadata
-        file_found = False
-        for i, file_entry in enumerate(metadata.get("files", [])):
-             if isinstance(file_entry, dict) and file_entry.get("filename") == filename:
-                 # Update existing entry
-                 if description is not None: # Allow empty string description
-                     file_entry["description"] = description
-                     
-                 if tags is not None: # Check if tags list was provided (even if empty)
-                     # Standardize new tags
-                     processed_new_tags = sorted(list(set([t.lower().strip() for t in tags if t and isinstance(t, str) and t.strip()])))
-                     # Merge with existing tags
-                     existing_tags = file_entry.get("tags", [])
-                     file_entry["tags"] = sorted(list(set(existing_tags + processed_new_tags)))
-                 
-                 # Update suggested questions if provided
-                 if suggested_questions is not None:
-                     file_entry["suggested_questions"] = suggested_questions
-
-                 # Update modification time
-                 file_entry["updated_date"] = time.strftime("%Y-%m-%d %H:%M:%S")
-                 metadata["files"][i] = file_entry # Update the entry in the list
-                 file_found = True
-                 logger.info(f"Updated metadata fields for {filename}")
-                 break # Found the file, no need to continue loop
-
-        if not file_found:
-             logger.warning(f"Tried to update metadata for '{filename}', but it was not found in the metadata file.")
-             # Optionally, add it if description or tags were provided?
-             # For now, let's just return False if not found.
-             return False
-
-        # Save updated metadata
-        with open(metadata_path, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=2)
-
-        logger.info(f"Metadata file saved successfully after updating {filename}.")
-        return True
-
-    except json.JSONDecodeError:
-         logger.error(f"Error parsing metadata file during update: {metadata_path}")
-         return False
-    except Exception as e:
-        logger.error(f"Error updating metadata for {filename}: {str(e)}")
-        logger.error(traceback.format_exc())
-        return False
-
-
-# Query parsing and context retrieval
-def parse_file_query(query: str, available_files: List[str], selected_files: List[str] = None) -> Tuple[str, List[str]]:
-    """
-    Smarter query parsing that considers already selected files and different phrasings.
-    Defaults to searching all selected files if query is ambiguous regarding targets.
-
-    Args:
-        query: The user's query.
-        available_files: List of all available filenames in the vault.
-        selected_files: List of currently selected filenames by the user.
-
-    Returns:
-        cleaned_query: The query string with file specifiers removed.
-        target_files: List of target filenames identified from the query or context.
-    """
-    if selected_files is None:
-        selected_files = []
-
-    if not available_files:
-        logger.debug("parse_file_query: No available files in vault.")
-        return query, []
-
-    original_query = query.strip()
-    query_lower = original_query.lower()
-    # Create a mapping of lowercase filenames to original case for matching
-    available_files_lower = {f.lower(): f for f in available_files}
-
-    # --- Patterns to Extract Filename and Query ---
-
-    # Pattern 1: Keywords at start, then file(s), then separator, then query
-    # e.g., "in file X about Y", "compare file A and B on Z"
-    pattern_keyword_file_query = r"(?i)(?:in|from|using|search|check|within|compare|contrast|difference between)\s+(?:file|document|doc)[s]?\s+((?:[a-zA-Z0-9_\.\-]+(?:(?:[,]?\s+|\s+and\s+)\s*[a-zA-Z0-9_\.\-])*))\s*(?:[:\-,\s]|on|about|regarding|with\srespect\sto)\s*(.+)"
-
-    # Pattern 2: Simple "file X : query" or "doc X query" structure
-    pattern_file_colon_query = r"(?i)(?:file|document|doc)[s]?\s+([a-zA-Z0-9_\.\-]+)\s*[:\-,\s]\s*(.+)"
-
-    # Pattern 3: Query first, then keyword, then filename at the end
-    # e.g., "what is X in file Y", "tell me about Z from doc A", "navigation in manual B?"
-    # Made the space after the optional "file/doc" also optional using \s*
-    pattern_query_keyword_file = r"(.+?)\s+(?:in|from|about)\s+(?:the\s+)?(?:file|document|doc)?\s*([a-zA-Z0-9_\.\-]+)$"
-
-    cleaned_query = original_query # Default if no pattern modifies it
-    explicit_target_files = []
-
-    # --- Try Matching Patterns in Order ---
-
-    # Try Pattern 1
-    match = re.match(pattern_keyword_file_query, original_query)
-    if match:
-        # This check is slightly wrong, should check groups count *before* accessing
-        # Corrected logic: Check which pattern matched based on successful match object
-        file_refs_raw = match.group(1).strip()
-        # Group index for query is 2 in this pattern
-        cleaned_query = match.group(2).strip()
-        logger.debug(f"Parser matched Pattern 1: Files='{file_refs_raw}', Query='{cleaned_query}'")
-        potential_refs = re.split(r'[\s,]+(?:and\s+)?', file_refs_raw)
-        for ref in potential_refs:
-            ref_lower = ref.strip().lower()
-            if ref_lower in available_files_lower:
-                explicit_target_files.append(available_files_lower[ref_lower])
-        if explicit_target_files:
-             logger.info(f"Explicit targets from Pattern 1: {explicit_target_files}")
-             return cleaned_query, explicit_target_files
-        else:
-             logger.warning(f"Pattern 1 matched but filenames '{file_refs_raw}' not found in available files.")
-             cleaned_query = original_query
-             explicit_target_files = []
-
-    # Try Pattern 2 (if Pattern 1 failed or found no valid files)
-    if not explicit_target_files:
-        match = re.match(pattern_file_colon_query, original_query)
-        if match:
-            file_refs_raw = match.group(1).strip()
-             # Group index for query is 2 in this pattern
-            cleaned_query = match.group(2).strip()
-            logger.debug(f"Parser matched Pattern 2: File='{file_refs_raw}', Query='{cleaned_query}'")
-            ref_lower = file_refs_raw.lower()
-            if ref_lower in available_files_lower:
-                explicit_target_files.append(available_files_lower[ref_lower])
-                logger.info(f"Explicit targets from Pattern 2: {explicit_target_files}")
-                return cleaned_query, explicit_target_files
-            else:
-                logger.warning(f"Pattern 2 matched but filename '{file_refs_raw}' not found in available files.")
-                cleaned_query = original_query
-                explicit_target_files = []
-
-    # Try Pattern 3 (if previous failed or found no valid files)
-    if not explicit_target_files:
-        match = re.match(pattern_query_keyword_file, original_query)
-        if match:
-            # Group 1 is the query, Group 2 is the filename
-            cleaned_query = match.group(1).strip()
-            file_refs_raw = match.group(2).strip()
-            logger.debug(f"Parser matched Pattern 3: Query='{cleaned_query}', File='{file_refs_raw}'")
-            ref_lower = file_refs_raw.lower()
-            if ref_lower in available_files_lower:
-                explicit_target_files.append(available_files_lower[ref_lower])
-                logger.info(f"Explicit targets from Pattern 3: {explicit_target_files}")
-                return cleaned_query, explicit_target_files
-            else:
-                 logger.warning(f"Pattern 3 matched but filename '{file_refs_raw}' not found in available files.")
-                 # Reset query for default logic
-                 cleaned_query = original_query
-                 explicit_target_files = []
-
-    # --- Default Logic (No explicit files successfully parsed) ---
-    # This section runs if none of the patterns above resulted in finding valid, available files.
-    logger.debug("No specific file pattern matched or valid filenames not found. Applying default logic based on selection.")
-
-    # Detect general queries that should likely apply to all selected files
-    general_query_patterns = [
-        r"\b(summarize|summary|overview|recap)\b",
-        r"\b(compare|contrast|difference|differences)\b",
-        r"\bwhat(?:'s| is| are) (?:in|inside|contained in)\b",
-        r"\b(tell me about|describe|explain|list)\b.+\b(all|every|each|both)\b",
-        r"^(compare|contrast|summarize)(?:\s+.*)?$", # Starts with these verbs
-    ]
-    is_general_query = any(re.search(pattern, query_lower) for pattern in general_query_patterns)
-
-    if is_general_query:
-        # If it's a general query, target all currently selected files
-        logger.info(f"Default logic: General query detected, targeting all selected files: {selected_files}")
-        return original_query, selected_files # Return original query text
-    elif len(selected_files) == 1:
-        # If only one file is selected, assume the query applies to it implicitly
-        logger.info(f"Default logic: Single file selected, using it as implicit target: {selected_files[0]}")
-        return original_query, selected_files # Target the single selected file
-    elif len(selected_files) > 1:
-        # If multiple files selected, query isn't general, and no specific file parsed,
-        # default to searching ALL selected files. Ambiguity check later will handle clarification.
-        logger.info(f"Default logic: Multiple files selected ({len(selected_files)}) but not general/specific. Targeting ALL selected files by default.")
-        return original_query, selected_files
-    else: # No files selected
-        logger.info("Default logic: No files selected. Returning empty target list.")
-        return original_query, []
-
-
-    # Log the input and output queries for debugging
-    logger.info(f"Original query: '{query}'")
-    logger.info(f"After parsing: cleaned='{cleaned_query}', targets={target_files}")
-
-    # Default return if no specific pattern matched or context applied
-    # If selected_files exist and it's not a general query, target_files should be selected_files
-    if selected_files and not is_general_query:
-        logger.info(f"Defaulting to selected files: {selected_files}")
-        return query, selected_files
-    elif selected_files and is_general_query:
-        logger.info(f"Defaulting to selected files for general query: {selected_files}")
-        return query, selected_files
+    if pipeline_preference == "visual":
+        metadata_tags.append("visual_pipeline")
+        processed_doc_base_visual = os.path.join(config_dict["processed_docs_subdir"], doc_id)
+        processed_path_for_meta = processed_doc_base_visual # Store the base dir for visual
+        initial_pipeline_step_status = "visual_images_pending"
+    elif pipeline_preference == "textual":
+        metadata_tags.append("textual_pipeline")
+        # For textual, we don't know the final filename yet, but can anticipate it or leave blank
+        # Let's just store doc_id for now, will update later
+        processed_path_for_meta = f"{doc_id}_textual.txt" # Placeholder filename
+        initial_pipeline_step_status = "textual_file_pending"
     else:
-        # If no files selected or other cases, return query and empty targets
-        logger.info("No specific file targets identified, returning original query and empty targets.")
-        return query, []
-
-
-# --- Response cleaning and formatting ---
-def clean_response_language(
-    response: str,
-    remove_hedging: bool = True,
-    remove_references: bool = True,
-    remove_disclaimers: bool = True,
-    ensure_html_structure: bool = True,
-    custom_hedging_patterns: Optional[List[str]] = None,
-    custom_reference_patterns: Optional[List[str]] = None,
-    custom_disclaimer_patterns: Optional[List[str]] = None,
-    html_tags_to_fix: Optional[List[str]] = None,
-    format: str = "html"  # Added format parameter
-) -> str:
-    """Cleans the LLM response by removing hedging language, references, and disclaimers."""
-    
-    cleaned_response = response
-    
-    # Remove hedging language patterns
-    if remove_hedging:
-        hedging_patterns = custom_hedging_patterns or [
-            r"I think ", r"I believe ", r"It appears that ", r"It seems like ",
-            r"possibly ", r"probably ", r"maybe ", r"perhaps ",
-            r"I'm not entirely sure, but ", r"As far as I can tell, ",
-            r"Based on my understanding, ", r"To the best of my knowledge, "
-        ]
-        for pattern in hedging_patterns:
-            cleaned_response = re.sub(pattern, "", cleaned_response, flags=re.IGNORECASE)
-    
-    # Remove references to the document
-    if remove_references:
-        reference_patterns = custom_reference_patterns or [
-            r"According to the document, ", r"As mentioned in the document, ",
-            r"As stated in the document, ", r"The document mentions that ",
-            r"Based on the provided context, ", r"From the information provided, ",
-            r"As per the document, ", r"In the document, it says that "
-        ]
-        for pattern in reference_patterns:
-            cleaned_response = re.sub(pattern, "", cleaned_response, flags=re.IGNORECASE)
-    
-    # Remove disclaimers
-    if remove_disclaimers:
-        disclaimer_patterns = custom_disclaimer_patterns or [
-            r"I'm not an expert[^.]*\.", r"I'm just an AI[^.]*\.",
-            r"Please consult a professional[^.]*\.", r"I don't have access to[^.]*\.",
-            r"Keep in mind that[^.]*\.", r"Please note that[^.]*\.",
-            r"It's important to note that[^.]*\.", r"I should note that[^.]*\."
-        ]
-        for pattern in disclaimer_patterns:
-            cleaned_response = re.sub(pattern, "", cleaned_response, flags=re.IGNORECASE)
-    
-    # Format-specific processing
-    if format.lower() == "html":
-        # Ensure proper HTML structure if enabled
-        if ensure_html_structure:
-            tags_to_check = html_tags_to_fix or ["p", "div", "span", "h1", "h2", "h3", "h4", "ul", "ol", "li", "pre", "code"]
-            
-            # Add HTML wrapper if none exists and response is plain text
-            if not re.search(r'<\w+>', cleaned_response):
-                cleaned_response = f"<p>{cleaned_response}</p>"
-            
-            # Fix common unclosed tags
-            for tag in tags_to_check:
-                # Count opening and closing tags
-                open_tags = len(re.findall(f'<{tag}[^>]*>', cleaned_response, re.IGNORECASE))
-                close_tags = len(re.findall(f'</{tag}>', cleaned_response, re.IGNORECASE))
-                
-                # Add missing closing tags
-                for _ in range(open_tags - close_tags):
-                    cleaned_response += f"</{tag}>"
-    
-    elif format.lower() == "markdown":
-        # Convert any HTML to Markdown if present (basic conversion)
-        # This is a simple implementation - for more complex HTML, consider using a library
-        
-        # Replace common HTML tags with Markdown
-        # Headers
-        cleaned_response = re.sub(r'<h1>(.*?)</h1>', r'# \1', cleaned_response, flags=re.IGNORECASE)
-        cleaned_response = re.sub(r'<h2>(.*?)</h2>', r'## \1', cleaned_response, flags=re.IGNORECASE)
-        cleaned_response = re.sub(r'<h3>(.*?)</h3>', r'### \1', cleaned_response, flags=re.IGNORECASE)
-        cleaned_response = re.sub(r'<h4>(.*?)</h4>', r'#### \1', cleaned_response, flags=re.IGNORECASE)
-        
-        # Lists
-        cleaned_response = re.sub(r'<ul>(.*?)</ul>', r'\1', cleaned_response, flags=re.IGNORECASE | re.DOTALL)
-        cleaned_response = re.sub(r'<ol>(.*?)</ol>', r'\1', cleaned_response, flags=re.IGNORECASE | re.DOTALL)
-        cleaned_response = re.sub(r'<li>(.*?)</li>', r'- \1\n', cleaned_response, flags=re.IGNORECASE)
-        
-        # Emphasis
-        cleaned_response = re.sub(r'<strong>(.*?)</strong>', r'**\1**', cleaned_response, flags=re.IGNORECASE)
-        cleaned_response = re.sub(r'<b>(.*?)</b>', r'**\1**', cleaned_response, flags=re.IGNORECASE)
-        cleaned_response = re.sub(r'<em>(.*?)</em>', r'*\1*', cleaned_response, flags=re.IGNORECASE)
-        cleaned_response = re.sub(r'<i>(.*?)</i>', r'*\1*', cleaned_response, flags=re.IGNORECASE)
-        
-        # Code
-        cleaned_response = re.sub(r'<code>(.*?)</code>', r'`\1`', cleaned_response, flags=re.IGNORECASE)
-        cleaned_response = re.sub(r'<pre>(.*?)</pre>', r'```\n\1\n```', cleaned_response, flags=re.IGNORECASE | re.DOTALL)
-        
-        # Links
-        cleaned_response = re.sub(r'<a href="(.*?)">(.*?)</a>', r'[\2](\1)', cleaned_response, flags=re.IGNORECASE)
-        
-        # Paragraphs
-        cleaned_response = re.sub(r'<p>(.*?)</p>', r'\1\n\n', cleaned_response, flags=re.IGNORECASE)
-        
-        # Remove other HTML tags
-        cleaned_response = re.sub(r'<[^>]*>', '', cleaned_response)
-        
-        # Fix common Markdown formatting issues
-        # Multiple consecutive line breaks
-        cleaned_response = re.sub(r'\n{3,}', '\n\n', cleaned_response)
-        
-    # Strip leading/trailing whitespace
-    cleaned_response = cleaned_response.strip()
-    
-    return cleaned_response
-
-# Update generate_no_information_response to support Markdown
-def generate_no_information_response(
-    query: str,
-    selected_files: List[str],
-    title: str = "Information Not Found",
-    custom_message: Optional[str] = None,
-    include_suggestions: bool = True,
-    custom_suggestions: Optional[List[str]] = None,
-    html_format: bool = True,
-    format: str = "html"  # Added format parameter
-) -> str:
-    """Generates a structured response when no relevant information is found."""
-    
-    # Default message if none provided
-    if custom_message is None:
-        message = f"I couldn't find specific information about that in the selected document(s)."
-    else:
-        message = custom_message
-        
-    # Generate suggestions if requested
-    suggestions_html = ""
-    suggestions_md = ""
-    if include_suggestions:
-        suggestion_list = custom_suggestions or [
-            f"Try rephrasing your question with more specific terms",
-            f"Check if you've selected the right document(s)",
-            f"Try a more general question about the document's topic",
-            f"Ask about the main topics covered in the document"
-        ]
-        
-        suggestions_html = "<ul>\n" + "\n".join([f"<li>{s}</li>" for s in suggestion_list]) + "\n</ul>"
-        suggestions_md = "\n" + "\n".join([f"- {s}" for s in suggestion_list])
-    
-    # Format the final response based on requested format
-    if format.lower() == "html" or html_format:  # Maintain backward compatibility with html_format
-        response = (
-            f"<div class='no-info-response'>\n"
-            f"<h3>{title}</h3>\n"
-            f"<p>{message}</p>\n"
-            f"{suggestions_html}\n"
-            f"</div>"
-        )
-    else:  # Markdown format
-        response = (
-            f"### {title}\n\n"
-            f"{message}\n\n"
-            f"{suggestions_md}"
-        )
-        
-    return response
-
-# --- Context Retrieval (using the more refined version) ---
-
-
-
-
-
-
-
-
-
-
-
-async def get_relevant_context_multifile(
-    query: str,
-    embeddings_by_file: Dict[str, torch.Tensor],
-    content_by_file: Dict[str, List[str]],
-    target_files: List[str] = None,
-    top_k_per_file: int = 7,
-    similarity_threshold: float = 0.5,
-    force_summary: bool = False
-) -> List[Dict]:
-    """Finds relevant context from multiple files with improved heading detection."""
-    results = []
-    device = CONFIG.get("device", torch.device("cpu"))
-
-    # Determine which files to search
-    # If target_files is explicitly provided (e.g., from parse_file_query), use it.
-    # Otherwise, default to searching all files for which we have embeddings.
-    files_to_search = target_files if target_files is not None else list(embeddings_by_file.keys())
-
-    if not files_to_search:
-         logger.warning("get_relevant_context called with no files to search.")
-         return []
-
-    logger.info(f"Context search targets ({len(files_to_search)} files): {files_to_search}")
-
-
-    # Use the passed force_summary flag instead of recalculating
-    is_summary_query = force_summary
-
-    # Log exactly what was detected for easier debugging
-    if is_summary_query:
-        logger.info(f"Summary mode ACTIVE for context retrieval. Query: '{query}'")
-        logger.info(f"Will provide representative content from {len(files_to_search)} target files.")
-    else:
-         logger.info(f"Standard context retrieval mode. Query: '{query}'")
-
-    # --- Summary Handling ---
-    if is_summary_query and files_to_search:
-        logger.info(f"Executing summary context retrieval for files: {files_to_search}")
-        for filename in files_to_search:
-            if filename not in content_by_file or not content_by_file[filename]:
-                logger.warning(f"No content found for {filename} in summary request, skipping.")
-                continue
-
-            chunks = content_by_file[filename]
-            total_chunks = len(chunks)
-            logger.info(f"File {filename} has {total_chunks} total chunks for summary sampling.")
-
-            # SPECIAL HANDLING FOR VERY SMALL FILES
-            if total_chunks <= 5: # Increased threshold slightly
-                # For tiny files, just use all available chunks with high scores
-                logger.info(f"Small file detected: {filename} with only {total_chunks} chunks. Using all chunks.")
-                for idx in range(total_chunks):
-                    results.append({
-                        "content": chunks[idx].strip(),
-                        "score": 1.0 - (0.01 * idx),  # Slightly descending scores
-                        "filename": filename,
-                        "position": f"{idx+1}/{total_chunks}" # Add position info
-                    })
-                continue # Move to next file
-
-            # Regular sampling logic for larger files continues...
-
-            # For summaries, we want representative chunks: start, middle, end
-            sample_indices = []
-
-            # Always take the first 2 chunks (likely title, intro)
-            sample_indices.extend([0, 1])
-
-            # Add chunks around 25%, 50%, 75% marks
-            if total_chunks > 10: # Only sample middle if reasonably large
-                sample_indices.extend([
-                    max(2, total_chunks // 4),      # ~25% position (ensure not overlapping with start)
-                    max(sample_indices[-1] + 1, total_chunks // 2),      # ~50% position
-                ])
-
-            if total_chunks > 20: # Add 75% for longer docs
-                sample_indices.append(max(sample_indices[-1] + 1, total_chunks * 3 // 4)) # ~75% position
-
-            # Always add the last chunk
-            sample_indices.append(total_chunks - 1)
-
-            # Ensure indices are unique, sorted, and within bounds
-            unique_indices = sorted(list(set([idx for idx in sample_indices if 0 <= idx < total_chunks])))
-
-            logger.info(f"Selected {len(unique_indices)} representative indices for summary of {filename}: {unique_indices}")
-
-            # Add selected chunks to results with scores prioritizing start/end
-            for i, idx in enumerate(unique_indices):
-                # Assign score based on position (higher score = earlier in prompt)
-                position_score = 1.0
-                if idx == 0: position_score = 1.0
-                elif idx == 1: position_score = 0.99
-                elif idx == total_chunks - 1: position_score = 0.98
-                else: position_score = 0.97 - (i * 0.01) # Middle chunks slightly lower
-
-                # Check for empty content before adding
-                content = chunks[idx].strip()
-                if not content:
-                    logger.debug(f"Skipping empty chunk at position {idx+1}/{total_chunks} for summary of {filename}")
-                    continue
-
-                results.append({
-                    "content": content,
-                    "score": position_score,
-                    "filename": filename,
-                    "position": f"{idx+1}/{total_chunks}" # Add position info
-                })
-
-        if results:
-            # Sort by filename first, then by position-based score (descending) for coherence
-            results.sort(key=lambda x: (x["filename"], -x["score"]))
-
-            logger.info(f"Returning {len(results)} chunks for summary request, sorted by file and position score.")
-            return results # Return early for summary requests
-
-    # --- Standard Query Handling ---
-    if not files_to_search: # Should be caught earlier, but double-check
-         logger.warning("Standard context retrieval called with no files to search.")
-         return []
-
-    # --- Standard Query Handling ---
-    # Get query embedding
-    try:
-        # Run embedding generation in a thread pool to avoid blocking
-        logger.debug(f"Generating embedding for query: '{query[:100]}...'")
-        response = await asyncio.to_thread(
-            lambda: ollama.embeddings(model=CONFIG["ollama_embedding_model"], prompt=query)
-        )
-        query_embedding = response["embedding"]
-        # Move query tensor to the correct device
-        query_tensor = torch.tensor(query_embedding, dtype=torch.float32, device=device).unsqueeze(0)
-        logger.debug(f"Query embedding generated, shape: {query_tensor.shape}, device: {query_tensor.device}")
-    except Exception as e:
-        logger.error(f"Error generating query embedding: {str(e)}")
-        return [] # Cannot proceed without query embedding
-
-    # Process each targeted file
-    all_file_results = []
-    for filename in files_to_search:
-        if filename not in embeddings_by_file or filename not in content_by_file:
-            logger.warning(f"Missing embeddings or content for targeted file {filename}, skipping.")
-            continue
-
-        file_content = content_by_file[filename]
-        file_embeddings = embeddings_by_file[filename] # Should already be on the correct device
-
-        if not file_content or file_embeddings is None or file_embeddings.shape[0] == 0:
-            logger.warning(f"Empty content or embeddings for targeted file {filename}, skipping.")
-            continue
-
-        # Ensure embeddings are on the same device as the query tensor
-        if file_embeddings.device != device:
-             logger.warning(f"Embeddings for {filename} are on {file_embeddings.device}, moving to {device}")
-             try:
-                 file_embeddings = file_embeddings.to(device)
-             except Exception as device_error:
-                 logger.error(f"Error moving tensor to device {device}: {str(device_error)}")
-                 # Continue with original device if transfer fails
-                 logger.warning(f"Continuing with original device: {file_embeddings.device}")
-
-
-        # Calculate cosine similarity
-        try:
-            logger.debug(f"Calculating similarity for {filename}. Query shape: {query_tensor.shape}, Embeddings shape: {file_embeddings.shape}")
-            cos_scores = torch.cosine_similarity(query_tensor, file_embeddings, dim=1)
-            logger.debug(f"Calculated {len(cos_scores)} scores for {filename}.")
-        except Exception as e:
-            logger.error(f"Error calculating similarity for {filename}: {e}")
-            logger.error(f"Query tensor device: {query_tensor.device}, dtype: {query_tensor.dtype}")
-            logger.error(f"File embeddings device: {file_embeddings.device}, dtype: {file_embeddings.dtype}")
-            continue
-
-
-        # Get top k results for this file - like V3
-        effective_top_k = min(top_k_per_file, len(cos_scores))
-        if effective_top_k <= 0:
-            logger.debug(f"No valid scores or top_k=0 for {filename}, skipping.")
-            continue
-
-        try:
-            top_results = torch.topk(cos_scores, k=effective_top_k)
-            top_indices = top_results.indices.tolist()
-            top_scores = top_results.values.tolist()
-            logger.debug(f"Top {effective_top_k} results for {filename}: Scores {top_scores}")
-        except Exception as e:
-            logger.error(f"Error getting topk results for {filename}: {e}")
-            continue
-
-
-        # Add results from this file meeting threshold
-        for idx, score in zip(top_indices, top_scores):
-            if idx < len(file_content) and score >= similarity_threshold:
-                content = file_content[idx].strip()
-                if not content: continue # Skip empty chunks
-
-                # Heading detection and context expansion (minor improvement: check length)
-                is_heading_like = (
-                    (re.match(r'^\s*[0-9]+\.', content) and len(content) < 100) or # Starts with number. and short
-                    (re.match(r'(?i)^(?:' + '|'.join(heading_keywords) + r')\b', content) and len(content) < 100) or # Starts with keyword and short
-                    (len(content.split()) < 10 and content.isupper()) # All caps and short
-                )
-
-                context_enhanced_content = content
-                if is_heading_like:
-                    # Add previous chunk if available and not already added
-                    if idx > 0:
-                         prev_content = file_content[idx - 1].strip()
-                         if prev_content:
-                             context_enhanced_content = prev_content + "\n\n" + context_enhanced_content
-
-                    # Add next chunk if available and not already added
-                    if idx + 1 < len(file_content):
-                         next_content = file_content[idx + 1].strip()
-                         if next_content:
-                              context_enhanced_content = context_enhanced_content + "\n\n" + next_content
-
-                all_file_results.append({
-                    "content": context_enhanced_content,
-                    "score": float(score),
-                    "filename": filename,
-                    "original_index": idx # Keep track of original chunk index if needed
-                })
-            # else: logger.debug(f"Chunk {idx} score {score:.3f} below threshold {similarity_threshold}")
-
-
-    # Sort all results from all files by score
-    all_file_results.sort(key=lambda x: x["score"], reverse=True)
-
-    # Deduplicate results based on content (simple exact match deduplication)
-    unique_content_seen = set()
-    final_results = []
-    for r in all_file_results:
-        content_key = r["content"] # Use the potentially expanded content for deduplication
-        if content_key not in unique_content_seen:
-            unique_content_seen.add(content_key)
-            final_results.append(r)
-            if len(final_results) >= 15: # Limit total context chunks sent to LLM
-                 logger.info(f"Reached max context limit (15 unique chunks).")
-                 break
-        # else: logger.debug(f"Skipping duplicate content chunk from {r['filename']}")
-
-    logger.info(f"Returning {len(final_results)} unique relevant chunks for standard query '{query[:50]}...'.")
-    return final_results
-
-
-async def ollama_chat_multifile_async(
-    user_input: str,
-    selected_files: List[str],
-    embeddings_by_file: Dict[str, torch.Tensor],
-    content_by_file: Dict[str, List[str]],
-    client_id: str,
-    target_files: Optional[List[str]] = None, 
-    force_summary: bool = False,
-    # Custom parameters for LLM and RAG
-    ollama_model_override: Optional[str] = None,
-    ollama_embedding_model_override: Optional[str] = None,
-    top_k_per_file_override: Optional[int] = None,
-    similarity_threshold_override: Optional[float] = None,
-    temperature_override: Optional[float] = None,
-    top_p_override: Optional[float] = None,
-    system_prompt_override: Optional[str] = None,
-    # Response formatting options
-    clean_response_override: Optional[bool] = None,
-    remove_hedging: Optional[bool] = None,
-    remove_references: Optional[bool] = None,
-    remove_disclaimers: Optional[bool] = None,
-    ensure_html_structure: Optional[bool] = None,
-    custom_hedging_patterns: Optional[List[str]] = None,
-    custom_reference_patterns: Optional[List[str]] = None,
-    custom_disclaimer_patterns: Optional[List[str]] = None,
-    html_tags_to_fix: Optional[List[str]] = None,
-    # No information response options
-    no_info_title: Optional[str] = None,
-    no_info_message: Optional[str] = None,
-    include_suggestions: Optional[bool] = None,
-    custom_suggestions: Optional[List[str]] = None,
-    no_info_html_format: Optional[bool] = None,
-    # history: Optional[List[Dict[str, str]]] = None
-    format: str = "html",  # Add format parameter
-) -> str:
-    """
-    Handles the chat interaction using Ollama with customizable parameters.
-    """
-    logger.info(f"--- Chat Request ---")
-    logger.info(f"User Input: {user_input[:100]}...") # Log first 100 chars of user input
-    logger.info(f"Selected Files: {selected_files}")
-    logger.info(f"Target Files: {target_files}")
-    logger.info(f"Force Summary: {force_summary}")
-    logger.info(f"Client ID: {client_id}")
-
-    # --- Parameter Overrides ---
-    # Use overrides if provided, else fall back to defaults
-    ollama_model = ollama_model_override or CONFIG["ollama_model"]
-    embedding_model = ollama_embedding_model_override or CONFIG["ollama_embedding_model"]
-    top_k_per_file = top_k_per_file_override or CONFIG.get("top_k_per_file", 5)
-    similarity_threshold = similarity_threshold_override or CONFIG.get("similarity_threshold", 0.5)
-    temperature = temperature_override or CONFIG.get("temperature", 0.7)
-    top_p = top_p_override or CONFIG.get("top_p", 1.0)
-    system_prompt = system_prompt_override or CONFIG.get("system_prompt", "")
-
-    logger.info(f"Using Ollama Model: {ollama_model}")
-    logger.info(f"Using Embedding Model: {embedding_model}")
-    logger.info(f"Top K per File: {top_k_per_file}")
-    logger.info(f"Similarity Threshold: {similarity_threshold}")
-    logger.info(f"Temperature: {temperature}")
-    logger.info(f"Top P: {top_p}")
-    logger.info(f"System Prompt: {system_prompt[:50]}...") # Log first 50 chars of system prompt
-
-    # --- Content Filtering: Check Selected Files First ---
-
-
-
-
-
-
-
-    # Prioritize files explicitly selected by the user
-    files_with_content = {f: content_by_file[f] for f in selected_files if f in content_by_file}
-
-
-
-    logger.info(f"Files with content from selection: {list(files_with_content.keys())}")
-
-    # If no files from selection have content, fall back to all available files
-    if not files_with_content:
-        logger.warning("No content in selected files, falling back to all available files.")
-        files_with_content = content_by_file
-    logger.info(f"Selected files for context retrieval: {list(files_with_content.keys())}")
-
-    # --- Context Retrieval: Attempt to Find Relevant Context First ---
-    logger.info(f"Attempting to retrieve relevant context for query: '{user_input[:50]}...'")
-    relevant_context = await get_relevant_context_multifile(
-        query=user_input,
-        embeddings_by_file=embeddings_by_file,
-        content_by_file=files_with_content,
-        target_files=target_files,
-        top_k_per_file=top_k_per_file,
-        similarity_threshold=similarity_threshold,
-        force_summary=force_summary
-    )
-
-    logger.info(f"Relevant context retrieved: {len(relevant_context)} chunks found.")
-
-    # Check if this is a meta-instruction (system command or special query)
-    is_meta_instruction = False
-    # Check if the query contains any meta instruction patterns
-    meta_instruction_patterns = [
-        r'FORCE_SUMMARY_GENERATION',
-        r'^\/\w+',  # Commands starting with slash like /help
-        r'^![\w]+',  # Commands starting with ! like !clear
-        r'(?i)^(help|system|settings|clear|reset)',  # Common system command words
-    ]
-    is_meta_instruction = any(re.search(pattern, user_input.strip()) for pattern in meta_instruction_patterns)
-    
-    # Also handle the cleaned_query and query_target_files variables
-    cleaned_query = user_input
-    query_target_files = target_files if target_files else selected_files
-    
-    # --- Handle Case: No Context Found (After Search Attempted) ---
-    if not relevant_context and not is_meta_instruction:
-         logger.info("No relevant context found in targeted files for the query.")
-         no_info_response = generate_no_information_response(
-             query=cleaned_query, 
-             selected_files=query_target_files,
-             title=no_info_title or "Information Not Found",
-             custom_message=no_info_message,
-             include_suggestions=include_suggestions if include_suggestions is not None else True,
-             custom_suggestions=custom_suggestions,
-             html_format=no_info_html_format if no_info_html_format is not None else True,
-             format=format  # Pass the format parameter
-         )
-         logger.info(f"No information response generated: {no_info_response[:100]}...")
-         return no_info_response
-
-    # Chat history functions moved to global scope to avoid duplication
-    
-    # --- Prepare Messages for Ollama API ---
-        # For meta-instructions, we might not use the usual user/system message format
-    if is_meta_instruction:
-            messages = [{"role": "user", "content": user_input}]
-    else:
-        # Default to standard message format
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_input}
-        ]
-
-    logger.info(f"Message format for Ollama API: {[m['role'] + ': ' + m['content'][:50] + '...' for m in messages]}") # Log roles and first 50 chars
-
-    # --- Call Ollama API ---
-    try:
-        # Fix incorrect Ollama API call
-        response = await asyncio.to_thread(
-            lambda: ollama.chat(
-                model=ollama_model,
-                messages=messages,
-                options={
-                    "temperature": temperature,
-                    "top_p": top_p,
-                    "num_predict": 150,  # Equivalent to max_tokens
-                }
-            )
-        )
-
-        # --- Process Response ---
-        # The response structure might be different, adjust accordingly
-        raw_response = response["message"]["content"].strip()
-        logger.info(f"Raw LLM Response: {raw_response[:200]}...")
-        
-        # Only clean if explicitly requested or defaulting to True
-        should_clean = clean_response_override if clean_response_override is not None else True
-        if should_clean:
-            assistant_response = clean_response_language(
-                response=raw_response,
-                remove_hedging=remove_hedging if remove_hedging is not None else True,
-                remove_references=remove_references if remove_references is not None else True,
-                remove_disclaimers=remove_disclaimers if remove_disclaimers is not None else True,
-                ensure_html_structure=ensure_html_structure if ensure_html_structure is not None else True,
-                custom_hedging_patterns=custom_hedging_patterns,
-                custom_reference_patterns=custom_reference_patterns,
-                custom_disclaimer_patterns=custom_disclaimer_patterns,
-                html_tags_to_fix=html_tags_to_fix,
-                format=format  # Pass the format parameter
-            )
-        else:
-            assistant_response = raw_response
-
-        logger.info(f"Final Response: {assistant_response[:200]}...")
-        return assistant_response
-
-    except Exception as e:
-        logger.error(f"Error in Ollama API call: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Error processing request with Ollama API: {str(e)}")
-
-# --- HTTP API Endpoints ---
-
-@app.post("/chat", summary="Process Chat Message", response_model=ChatResponse)
-async def http_chat(request: ChatRequest):
-    """
-    Handles a chat message via REST API.
-    Allows customization of RAG, LLM parameters, and response formatting.
-    """
-    # Initialize client_id at the beginning to avoid UnboundLocalError
-    client_id = request.client_id or f"chat_{hashlib.md5(str(time.time()).encode()).hexdigest()[:10]}"
-    
-    try:
-        logger.info(f"--- HTTP Chat Request ---")
-        logger.info(f"Request Data: {request.model_dump()}")  # Updated from dict() to model_dump()
-
-        # 1. Validate and parse input
-        query = request.message.strip() if request.message else ""
-        if not query:
-            # Return a proper response instead of raising exception for empty queries
-            logger.warning(f"Empty query received from client {client_id}")
-            return ChatResponse(
-                message="I need a question or input to respond to. Please provide a message.",
-                all_messages=[],
-                chat_name=None,
-                client_id=client_id,
-                status="error"
-            )
-        
-        # 2. Check file access and read content
-        files_with_content = read_vault_content(request.selected_files)
-        if not files_with_content:
-            raise HTTPException(status_code=404, detail="No valid content found in the selected files.")
-        
-        # 3. Load existing chat history or create initial chat name
-        chat_history = load_chat_history(client_id)
-        if not chat_history:
-            # Initial chat name based on selected files and their types
-            if request.selected_files:
-                # Get base filename without timestamp
-                initial_filename = os.path.splitext(request.selected_files[0])[0]
-                initial_filename = re.sub(r'^\d+_', '', initial_filename)  # Remove timestamp prefix
-                initial_filename = re.sub(r'[_\-]', ' ', initial_filename).title()  # Replace underscores
-                
-                # Get file extensions to add to name
-                file_extensions = []
-                for file in request.selected_files:
-                    ext = os.path.splitext(file)[1].lower().replace('.', '')
-                    if ext and ext not in file_extensions:
-                        file_extensions.append(ext)
-                
-                # Create name with file type info
-                if file_extensions:
-                    file_types_str = f" ({', '.join(file_extensions)})"
-                    # Make sure the total length stays reasonable
-                    max_name_length = 25 - len(file_types_str)
-                    if len(initial_filename) > max_name_length:
-                        initial_filename = initial_filename[:max_name_length] + "..."
-                    initial_chat_name = initial_filename + file_types_str
-                else:
-                    # Fallback if no extensions found
-                    if len(initial_filename) > 27:
-                        initial_filename = initial_filename[:27] + "..."
-                    initial_chat_name = initial_filename
-            else:
-                initial_chat_name = "New Chat"
-        else:
-            initial_chat_name = chat_history.get("chat_name", "New Chat")
-        
-        # 4. Save user message to history
-        user_message = {
-            "role": "user",
-            "content": query,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-        }
-        updated_history = save_chat_history(client_id, initial_chat_name, user_message, request.selected_files)
-
-        # Generate embeddings for the file content
-        embeddings_by_file = await generate_vault_embeddings(files_with_content)
-        
-        # 5. Process request and generate response
-        response_text = await ollama_chat_multifile_async(
-            user_input=request.message,
-            selected_files=list(files_with_content.keys()),
-            embeddings_by_file=embeddings_by_file,
-            content_by_file=files_with_content,
-            client_id=client_id,
-            # All the optional parameters
-            ollama_model_override=request.ollama_model,
-            ollama_embedding_model_override=request.ollama_embedding_model,
-            top_k_per_file_override=request.top_k_per_file,
-            similarity_threshold_override=request.similarity_threshold,
-            temperature_override=request.temperature,
-            top_p_override=request.top_p,
-            system_prompt_override=request.clean_response,
-            remove_hedging=request.remove_hedging,
-            remove_references=request.remove_references,
-            remove_disclaimers=request.remove_disclaimers,
-            ensure_html_structure=request.ensure_html_structure,
-            custom_hedging_patterns=request.custom_hedging_patterns,
-            custom_reference_patterns=request.custom_reference_patterns,
-            custom_disclaimer_patterns=request.custom_disclaimer_patterns,
-            html_tags_to_fix=request.html_tags_to_fix,
-            no_info_title=request.no_info_title,
-            no_info_message=request.no_info_message,
-            include_suggestions=request.include_suggestions,
-            custom_suggestions=request.custom_suggestions,
-            no_info_html_format=request.no_info_html_format,
-            format=request.format or "html"  # Pass the format parameter
-        )
-        
-        # 6. Save response to chat history
-        assistant_message = {
-            "role": "assistant",
-            "content": response_text,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
-        }
-        updated_history = save_chat_history(client_id, initial_chat_name, assistant_message, request.selected_files)
-        
-        # 7. Check if we should generate an AI-powered name (after 2 messages, 1 user + 1 assistant)
-        if updated_history and len(updated_history["messages"]) >= 4 and not updated_history.get("ai_named", False):
-            logger.info(f"Generating AI name for chat {client_id} after {len(updated_history['messages'])} messages")
-            await generate_chat_name(client_id, updated_history["messages"], OLLAMA_CONFIG)
-        
-        # 8. Return response with updated chat_id and format
-        return ChatResponse(
-            message=response_text,
-            all_messages=updated_history["messages"],  # Return all messages in the chat
-            chat_name=updated_history["chat_name"],  # Return the chat name
-            client_id=client_id,
-            status="success"
-        )
-
-    except Exception as e:
-        logger.error(f"Error in chat handling for client {client_id}: {str(e)}")
-        logger.error(traceback.format_exc())
-        
-        # Return a proper error response instead of raising exception
-        return ChatResponse(
-            message="Sorry, I encountered an error processing your request. Please try again.",
-            all_messages=[],
-            chat_name=None,
-            client_id=client_id,
-            status="error"
-        )
-
-# Root endpoint for API status and information
-@app.get("/", summary="API Information")
-async def get_api_info():
-    return {
-        "status": "ok",
-        "version": "1.0.0",
-        "endpoints": ["/", "/chat", "/chat/{chat_id}", "/new-chat", "/file-selection", "/files"]
+        # This validation is also done in upload_file_http, but keep here for safety
+        return False, doc_id, f"Invalid pipeline preference: {pipeline_preference}"
+
+    # --- Save initial metadata ---
+    metadata_extra = {
+        "original_filename": original_filename,
+        "doc_type_extension": file_extension,
+        "pipeline_type": pipeline_preference,
+        "user_provided_description": user_description,
+        "page_count": page_count_val, # Initial page count (may update after processing)
+        "processed_path": processed_path_for_meta, # Initial guess/placeholder
+        "pipeline_step": initial_pipeline_step_status # Initial status
     }
+    effective_description = user_description if user_description else f"{pipeline_preference.capitalize()} doc: {original_filename}"
 
-# Create new chat session
-@app.post("/new-chat", summary="Create New Chat Session")
-async def create_new_chat():
-    try:
-        # Generate a new chat ID with timestamp
-        chat_id = f"chat_{int(datetime.now().timestamp())}_{uuid.uuid4().hex[:8]}"
-        
-        # Create entry in chat history storage
-        CHAT_HISTORY[chat_id] = {
-            "chat_id": chat_id,
-            "chat_name": "New Chat",
-            "messages": [],
-            "selected_files": [],
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
-        }
-        
-        return {
-            "chat_id": chat_id,
-            "chat_name": "New Chat",
-            "status": "created"
-        }
-    except Exception as e:
-        logger.error(f"Error creating new chat: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to create new chat: {str(e)}")
+    # Add file to vault, including initial metadata
+    if not common_utils.add_file_to_vault(config_dict, doc_id, effective_description, metadata_tags, metadata_extra):
+        logger.error(f"Failed to save initial document metadata for '{original_filename}' (ID: {doc_id}).")
+        return False, doc_id, "Failed to save initial document metadata."
 
-# Update file selection for a chat session
-@app.post("/file-selection", summary="Update Selected Files")
-async def update_file_selection(request: dict = Body(...)):
-    try:
-        session_id = request.get("session_id")
-        selected_files = request.get("selected_files", [])
-        
-        if not session_id:
-            raise HTTPException(status_code=400, detail="session_id is required")
-            
-        # Update chat session with selected files
-        if session_id in CHAT_HISTORY:
-            CHAT_HISTORY[session_id]["selected_files"] = selected_files
-            CHAT_HISTORY[session_id]["updated_at"] = datetime.now().isoformat()
-            
-            return {
-                "status": "updated",
-                "chat_id": session_id,
-                "selected_files": selected_files
-            }
-        else:
-            # Create new session if it doesn't exist
-            CHAT_HISTORY[session_id] = {
-                "chat_id": session_id,
-                "chat_name": "New Chat",
-                "messages": [],
-                "selected_files": selected_files,
-                "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat()
-            }
-            
-            return {
-                "status": "created",
-                "chat_id": session_id,
-                "selected_files": selected_files
-            }
-    except Exception as e:
-        logger.error(f"Error updating file selection: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to update file selection: {str(e)}")
+    # --- Perform Initial Pipeline Step ---
+    if pipeline_preference == "visual":
+        logger.info(f"Visual pipeline: Starting image extraction for doc_id: {doc_id}")
+        processed_doc_base_visual_full_path = os.path.join(config_dict["vault_directory"], processed_doc_base_visual)
+        output_image_dir_visual = os.path.join(processed_doc_base_visual_full_path, "pages")
 
-# File upload endpoint
-@app.post("/upload", summary="Upload a file")
-async def upload_file(file: UploadFile = File(...)):
-    try:
-        # Create a safe filename with timestamp prefix
-        timestamp = int(datetime.now().timestamp())
-        safe_filename = f"{timestamp}_{file.filename.replace(' ', '_')}"
-        
-        # Define the path to save the file
-        file_path = os.path.join(CONFIG["vault_directory"], safe_filename)
-        
-        # Ensure vault directory exists
-        os.makedirs(CONFIG["vault_directory"], exist_ok=True)
-        
-        # Save the uploaded file
-        with open(file_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
-        
-        # Add file metadata to the vault index
-        file_metadata = {
-            "filename": safe_filename,
-            "original_name": file.filename,
-            "description": f"Uploaded on {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-            "added_date": datetime.now().isoformat(),
-            "tags": ["uploaded"],
-            "size": len(content),
-            "content_type": file.content_type
-        }
-        
-        # Update vault metadata
-        add_file_to_vault(
-            safe_filename,
-            file_metadata["description"],
-            file_metadata["tags"]
-        )
-        
-        return {
-            "filename": safe_filename,
-            "size": len(content),
-            "status": "uploaded",
-            "message": f"File {file.filename} uploaded successfully as {safe_filename}"
-        }
-    
-    except Exception as e:
-        logger.error(f"Error uploading file: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
+        # Determine the target image format from config, default to png
+        target_img_format = config_dict.get('image_format', 'png').lower().lstrip('.')
+        if target_img_format not in ['png', 'jpg', 'jpeg', 'tiff']: # Add other formats if supported by cv2.imwrite
+             logger.warning(f"Unsupported target image format '{target_img_format}' configured. Defaulting to png.")
+             target_img_format = 'png'
 
-# Process document endpoint
-@app.post("/process", summary="Process an uploaded document")
-async def process_document(request: dict = Body(...)):
-    try:
-        filename = request.get("filename")
-        if not filename:
-            raise HTTPException(status_code=400, detail="Filename is required")
-        
-        file_path = os.path.join(CONFIG["vault_directory"], filename)
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail=f"File {filename} not found")
-        
-        # Extract text from file based on type
-        file_text = ""
-        if filename.endswith(".pdf"):
-            # Process PDF file
-            file_text = extract_text_from_pdf(file_path)
-        elif filename.endswith((".txt", ".md")):
-            # Process plain text
-            with open(file_path, "r", encoding="utf-8") as f:
-                file_text = f.read()
-        elif filename.endswith((".docx")):
-            # Process Word document
-            file_text = extract_text_from_docx(file_path)
-        else:
-            # Default text extraction
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                file_text = f.read()
-        
-        # Generate summary using the model
-        summary = await generate_ai_summary(file_text)
-        
-        # Update file metadata with summary
-        update_file_metadata(
-            filename=filename,
-            description=f"AUTO-SUMMARY: {summary[:200]}...",
-            tags=["processed", "auto-summarized"]
-        )
-        
-        return {
-            "filename": filename,
-            "summary": summary,
-            "status": "processed",
-            "message": f"File {filename} processed successfully"
-        }
-    
-    except Exception as e:
-        logger.error(f"Error processing document: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to process document: {str(e)}")
 
-# Helper function to extract text from PDF
-def extract_text_from_pdf(file_path):
-    try:
-        if not PdfReader:
-            logger.error("PDF processing requires 'pypdf'. Please install it.")
-            return "Error: PDF processing module not available"
-            
-        reader = PdfReader(file_path)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() + "\n"
-        return text
-    except Exception as e:
-        logger.error(f"Error extracting PDF text: {str(e)}")
-        return f"Error extracting text: {str(e)}"
-
-# Helper function to extract text from DOCX
-def extract_text_from_docx(file_path):
-    try:
-        # Try to import docx library
         try:
-            import docx
-        except ImportError:
-            logger.error("DOCX processing requires 'python-docx'. Please install it.")
-            return "Error: DOCX processing module not available"
-        
-        doc = docx.Document(file_path)
-        text = ""
-        for para in doc.paragraphs:
-            text += para.text + "\n"
-        return text
-    except Exception as e:
-        logger.error(f"Error extracting DOCX text: {str(e)}")
-        return f"Error extracting text: {str(e)}"
+            os.makedirs(processed_doc_base_visual_full_path, exist_ok=True)
+            os.makedirs(output_image_dir_visual, exist_ok=True)
+        except OSError as e_mkdir:
+            msg_pipeline_step = f"Server error creating visual directory structure: {e_mkdir}"
+            logger.error(msg_pipeline_step, exc_info=True)
+            common_utils.update_file_metadata(config_dict, doc_id, metadata_extra={"pipeline_step": "visual_image_extraction_failed_mkdir"})
+            return False, doc_id, msg_pipeline_step
 
-# Helper function to generate summary using AI
-async def generate_ai_summary(text):
+        if file_extension == "pdf":
+            if not PYMUPDF_AVAILABLE:
+                msg_pipeline_step = "PyMuPDF not available for visual PDF processing."
+                logger.error(msg_pipeline_step)
+                common_utils.update_file_metadata(config_dict, doc_id, metadata_extra={"pipeline_step": "visual_image_extraction_failed_pymupdf_missing"})
+                return False, doc_id, msg_pipeline_step
+
+            try:
+                pdf_doc_obj = fitz.open(temp_file_path)
+                page_count_val = pdf_doc_obj.page_count
+                if page_count_val == 0:
+                    pdf_doc_obj.close()
+                    raise ValueError("PDF has 0 pages")
+
+                extracted_pages_count = 0
+                for i in range(page_count_val):
+                    page = pdf_doc_obj.load_page(i)
+                    try:
+                        dpi = config_dict.get("image_dpi", 300)
+                        scale = dpi / 72.0
+                        # Use get_pixmap with options for image format and quality if needed
+                        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                        
+                        # Define output path using the TARGET format
+                        output_page_path = os.path.join(output_image_dir_visual, f"page_{i+1:04d}.{target_img_format}")
+
+                        # Save with appropriate parameters if needed (e.g. JPEG quality, PNG compression)
+                        save_params = []
+                        if target_img_format in ['jpg', 'jpeg']:
+                             save_params = [cv2.IMWRITE_JPEG_QUALITY, config_dict.get("jpeg_quality", 90)]
+                        elif target_img_format == 'png':
+                             save_params = [cv2.IMWRITE_PNG_COMPRESSION, config_dict.get("png_compression", 3)]
+
+                        # Convert pixmap to numpy array (BGRA -> BGR or Gray) and save using cv2.imwrite
+                        # This ensures consistent output format and allows using cv2 save options
+                        img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+                        if pix.n == 4: # Convert BGRA to BGR if it has alpha
+                             img_array = cv2.cvtColor(img_array, cv2.COLOR_BGRA2BGR)
+                        elif pix.n == 1: # Grayscale
+                             img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR) # Convert to BGR for consistent saving
+
+                        if cv2.imwrite(output_page_path, img_array, save_params):
+                            extracted_pages_count += 1
+                        else:
+                            logger.error(f"Failed to save processed image for page {i+1} of {doc_id} to {output_page_path}.")
+
+
+                    except Exception as e_page_pixmap:
+                        logger.error(f"Error processing or saving page {i+1} of {doc_id}: {e_page_pixmap}", exc_info=True)
+                        # Continue with other pages
+
+                pdf_doc_obj.close()
+                
+                # Check if at least one page was successfully extracted and saved
+                if extracted_pages_count > 0:
+                    initial_step_success = True
+                    msg_pipeline_step = f"Extracted and saved {extracted_pages_count} visual pages as .{target_img_format}."
+                    logger.info(msg_pipeline_step + f" (Doc ID: {doc_id})")
+                    # Update metadata *after* success, using the actual number of pages extracted
+                    common_utils.update_file_metadata(config_dict, doc_id, metadata_extra={"pipeline_step": "visual_images_extracted", "page_count": extracted_pages_count})
+                else:
+                    # 0 pages extracted, or all page extractions failed
+                    msg_pipeline_step = "Visual PDF processing failed: 0 pages extracted or error during all page processing."
+                    logger.error(msg_pipeline_step + f" (Doc ID: {doc_id})")
+                    initial_step_success = False
+                    common_utils.update_file_metadata(config_dict, doc_id, metadata_extra={"pipeline_step": "visual_image_extraction_failed_zero_pages"})
+
+            except Exception as e_pdf:
+                msg_pipeline_step = f"Visual PDF processing error: {e_pdf}"
+                logger.error(msg_pipeline_step, exc_info=True)
+                initial_step_success = False # Explicitly mark failure
+                common_utils.update_file_metadata(config_dict, doc_id, metadata_extra={"pipeline_step": "visual_image_extraction_failed_exception"})
+
+
+        elif file_extension in ["png", "jpg", "jpeg", "tiff"]: # Added tiff if you might handle it
+            page_count_val = 1
+            try:
+                # Ensure the target directory exists
+                os.makedirs(output_image_dir_visual, exist_ok=True)
+                # Define the target path for the single image, using the configured format
+                target_image_path = os.path.join(output_image_dir_visual, f"page_0001.{target_img_format}")
+
+                # Use OpenCV to read and save the image in the target format
+                img_array = cv2.imread(temp_file_path, cv2.IMREAD_UNCHANGED) # Read with unchanged flags to handle alpha
+                if img_array is None:
+                     raise ValueError(f"Failed to read image file with OpenCV: {temp_file_path}")
+
+                # Convert to BGR if grayscale or includes alpha for consistent saving
+                if len(img_array.shape) == 2: # Grayscale
+                     img_array_to_save = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+                elif img_array.shape[2] == 4: # BGRA
+                     img_array_to_save = cv2.cvtColor(img_array, cv2.COLOR_BGRA2BGR)
+                else: # BGR
+                     img_array_to_save = img_array
+
+                # Save with appropriate parameters
+                save_params = []
+                if target_img_format in ['jpg', 'jpeg']:
+                     save_params = [cv2.IMWRITE_JPEG_QUALITY, config_dict.get("jpeg_quality", 90)]
+                elif target_img_format == 'png':
+                     save_params = [cv2.IMWRITE_PNG_COMPRESSION, config_dict.get("png_compression", 3)]
+                # Add TIFF or other format parameters here if needed
+
+                if cv2.imwrite(target_image_path, img_array_to_save, save_params):
+                    initial_step_success = True
+                    msg_pipeline_step = f"Visual image processed and saved as .{target_img_format}."
+                    logger.info(msg_pipeline_step + f" (Doc ID: {doc_id})")
+                    # Update metadata *after* success
+                    common_utils.update_file_metadata(config_dict, doc_id, metadata_extra={"pipeline_step": "visual_images_extracted", "page_count": page_count_val})
+                else:
+                     raise RuntimeError(f"Failed to save image to {target_image_path} using OpenCV.")
+
+
+            except Exception as e_img_proc:
+                msg_pipeline_step = f"Visual image processing error: {e_img_proc}"
+                logger.error(msg_pipeline_step, exc_info=True)
+                initial_step_success = False # Explicitly mark failure
+                common_utils.update_file_metadata(config_dict, doc_id, metadata_extra={"pipeline_step": "visual_image_extraction_failed_processing"})
+
+
+        else:
+            msg_pipeline_step = f"Unsupported file type '{file_extension}' for visual pipeline image extraction."
+            logger.warning(msg_pipeline_step)
+            initial_step_success = False # Explicitly mark failure
+            common_utils.update_file_metadata(config_dict, doc_id, metadata_extra={"pipeline_step": "visual_image_extraction_failed_unsupported_type"})
+
+    elif pipeline_preference == "textual":
+        logger.info(f"Textual pipeline: Starting text preparation for doc_id: {doc_id}")
+        try:
+            processed_text_filename_vault = await asyncio.to_thread(
+                textual_pipeline.prepare_textual_document,
+                config_dict,
+                temp_file_path,
+                doc_id,
+                original_filename
+            )
+            if processed_text_filename_vault:
+                initial_step_success = True
+                msg_pipeline_step = f"Textual document processed and saved as '{processed_text_filename_vault}'."
+                logger.info(msg_pipeline_step + f" (Doc ID: {doc_id})")
+                # Update metadata *after* success, including the actual processed path
+                common_utils.update_file_metadata(config_dict, doc_id, metadata_extra={"pipeline_step": "textual_file_prepared", "page_count": 1, "processed_path": processed_text_filename_vault})
+            else:
+                # textual_pipeline.prepare_textual_document should log the error internally
+                msg_pipeline_step = f"Textual pipeline failed to prepare document '{original_filename}'."
+                logger.error(msg_pipeline_step + f" (Doc ID: {doc_id})")
+                initial_step_success = False # Explicitly mark failure
+                # Update metadata to reflect failure
+                common_utils.update_file_metadata(config_dict, doc_id, metadata_extra={"pipeline_step": "textual_preparation_failed"})
+
+        except Exception as e_textual_prep:
+            msg_pipeline_step = f"Textual pipeline preparation encountered an exception: {e_textual_prep}"
+            logger.error(msg_pipeline_step + f" (Doc ID: {doc_id})", exc_info=True)
+            initial_step_success = False # Explicitly mark failure
+            common_utils.update_file_metadata(config_dict, doc_id, metadata_extra={"pipeline_step": f"textual_preparation_failed_exception_{e_textual_prep.__class__.__name__}"})
+
+
+    # --- Return based on the success of the initial step ---
+    if initial_step_success:
+        logger.info(f"Initial processing step successful for doc_id '{doc_id}' ('{original_filename}') as '{pipeline_preference}'. Msg: {msg_pipeline_step}")
+        return True, doc_id, msg_pipeline_step
+    else:
+        logger.error(f"Initial processing step failed for doc_id '{doc_id}' ('{original_filename}') as '{pipeline_preference}'. Msg: {msg_pipeline_step}")
+        # The metadata should have already been updated with a failure step inside the pipeline blocks
+        return False, doc_id, f"Initial processing step failed: {msg_pipeline_step}"
+
+async def generate_ai_metadata_and_update(
+    config_dict: Dict,
+    doc_id: str,
+    current_ollama_client: Optional[OpenAI],
+    common_utils_ref: Any
+):
+    if not current_ollama_client:
+        logger.warning(f"AI Meta: Ollama client NA for doc_id {doc_id}. Skipping.")
+        return
+        
+    logger.info(f"AI Meta Task: Starting for doc_id: {doc_id}")
+    doc_meta = common_utils_ref.get_specific_doc_metadata(config_dict, doc_id)
+    if not doc_meta:
+        logger.error(f"AI Meta: No metadata for {doc_id}.")
+        return
+
+    content_sample = ""
+    pipeline_type = doc_meta.get("pipeline_type", "visual")
+
+    if pipeline_type == "textual":
+        processed_textual_file = doc_meta.get("processed_path")
+        if processed_textual_file:
+            full_path = os.path.join(config_dict["vault_directory"], processed_textual_file)
+            if os.path.exists(full_path):
+                try:
+                    with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                        content_sample = f.read(15000)
+                    logger.info(f"AI Meta: Read sample from '{full_path}' for doc '{doc_id}'.")
+                except Exception as e:
+                    logger.error(f"AI Meta: Error reading '{full_path}': {e}")
+            else:
+                logger.warning(f"AI Meta: Processed textual file '{full_path}' not found for doc '{doc_id}'.")
+        else:
+            logger.warning(f"AI Meta: No 'processed_path' for textual doc '{doc_id}'.")
+    elif pipeline_type == "visual":
+        logger.info(f"AI Meta: Visual doc '{doc_id}'. AI desc from content not at upload. Using user desc.")
+
+    if content_sample.strip():
+        ai_desc, ai_tags = await common_utils_ref.generate_file_metadata(config_dict, content_sample, current_ollama_client)
+        if ai_desc or ai_tags:
+            final_desc = doc_meta.get("user_provided_description") or ""
+            if ai_desc and (not final_desc or len(ai_desc) > 10):
+                final_desc = ai_desc
+            combined_tags = sorted(list(set(doc_meta.get("tags", []) + (ai_tags if isinstance(ai_tags, list) else []))))
+            common_utils_ref.update_file_metadata(config_dict, doc_id, description=final_desc, tags=combined_tags,
+                                               metadata_extra={"ai_metadata_generated_at": datetime.now().isoformat()})
+            logger.info(f"AI Meta: Updated metadata for {doc_id} with AI insights.")
+        else:
+            logger.warning(f"AI Meta: No desc or tags from AI for {doc_id}.")
+    elif pipeline_type == "textual":
+        logger.warning(f"AI Meta: Content sample for textual doc {doc_id} empty.")
+    logger.info(f"AI Meta task finished for {doc_id}.")
+
+@app.post("/upload", summary="Upload File with Pipeline Preference")
+async def upload_file_http(
+    file: UploadFile = File(...),
+    user_description: Optional[str] = Form(None),
+    client_id: Optional[str] = Form(None),
+    pipeline_preference: str = Form("visual") # Default to visual
+):
+    temp_file_path = None
+    original_filename = file.filename or "unknown_file"
+    logger.info(f"Upload request for: '{original_filename}' from client: {client_id}, Preferred Pipeline: '{pipeline_preference}'")
     try:
-        if not ollama_client:
-            logger.error("Ollama client not available for summary generation")
-            return "Summary generation failed. Ollama client not available."
-            
+        safe_original_filename = os.path.basename(original_filename)
+        file_ext_from_name = os.path.splitext(safe_original_filename)[1].lower().lstrip('.')
+        if not file_ext_from_name:
+            file_ext_from_name = "unknown"
+
+        # Basic validation for pipeline preference and file type support
+        if pipeline_preference not in ["visual", "textual"]:
+            logger.warning(f"Invalid pipeline preference '{pipeline_preference}' received for '{original_filename}'. Defaulting to 'visual'.")
+            pipeline_preference = "visual" # Default to visual if invalid
+        if pipeline_preference == "visual" and file_ext_from_name not in ["pdf", "png", "jpg", "jpeg"]:
+            detail_msg = f"Visual pipeline for '.{file_ext_from_name}' not supported. Supported types: pdf, png, jpg, jpeg."
+            logger.warning(f"Upload failed for '{original_filename}': {detail_msg}")
+            raise HTTPException(status_code=400, detail=detail_msg)
+        if pipeline_preference == "textual" and file_ext_from_name in ["png", "jpg", "jpeg"]:
+            # Textual pipeline *can* potentially handle images via OCR, but the current
+            # `prepare_textual_document` might not. Let's restrict explicitly for now based on current `textual_pipeline`.
+             # NOTE: If textual_pipeline is updated to handle image OCR, this check can be relaxed.
+            detail_msg = f"Textual pipeline for '.{file_ext_from_name}' is not explicitly supported by the current implementation. Supported types often include pdf, txt, docx etc. but this depends on the 'textual_pipeline' prepare function."
+            logger.warning(f"Upload failed for '{original_filename}': {detail_msg}")
+            # Maybe allow with a warning, or reject? Let's reject to avoid later failures.
+            raise HTTPException(status_code=400, detail=detail_msg)
+
+
+        temp_dir = "temp_uploads"
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_file_path = os.path.join(temp_dir, f"temp_{uuid.uuid4().hex}_{safe_original_filename}")
+        bytes_written = 0
+        # Read the file in chunks
+        try:
+            with open(temp_file_path, "wb") as temp_f:
+                while content_chunk := await file.read(8 * 1024 * 1024): # Read in 8MB chunks
+                    temp_f.write(content_chunk)
+                    bytes_written += len(content_chunk)
+        except Exception as e_write_temp:
+             logger.error(f"Error writing temp file for '{original_filename}': {e_write_temp}", exc_info=True)
+             raise HTTPException(status_code=500, detail=f"Server error saving temporary file: {str(e_write_temp)[:100]}")
+
+        if bytes_written == 0:
+            if temp_file_path and os.path.exists(temp_file_path):
+                os.remove(temp_file_path) # Clean up empty temp file
+            logger.warning(f"Upload failed for '{original_filename}': Uploaded file is empty.")
+            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+        logger.info(f"Temp file '{temp_file_path}' ({bytes_written} bytes) saved for '{original_filename}'")
+
+        # Additional validation for PDF for visual pipeline
+        if pipeline_preference == "visual" and file_ext_from_name == "pdf":
+            if not PYMUPDF_AVAILABLE:
+                logger.error("PyMuPDF is not available, but visual PDF upload was attempted.")
+                raise HTTPException(status_code=501, detail="PyMuPDF library not available for visual PDF processing.")
+            try:
+                # Open PDF with fitz to validate
+                doc = fitz.open(temp_file_path)
+                if not doc.is_pdf:
+                    doc.close()
+                    raise ValueError("File is not recognized as a PDF.")
+                if doc.page_count == 0:
+                     doc.close()
+                     raise ValueError("PDF contains 0 pages.")
+                if doc.is_encrypted and not doc.authenticate(""): # Attempt authentication with empty password first
+                    doc.close()
+                    # Add a specific check or prompt if password is required? For now, fail.
+                    raise ValueError("PDF is encrypted and requires a password.")
+                doc.close() # Close the PDF object
+            except Exception as pdf_val_err:
+                # Clean up temp file on validation failure
+                if temp_file_path and os.path.exists(temp_file_path):
+                    try: os.remove(temp_file_path)
+                    except Exception as e_rem_val: logger.error(f"Error removing temp file {temp_file_path} after PDF validation error: {e_rem_val}")
+                logger.warning(f"PDF validation failed for '{original_filename}': {pdf_val_err}")
+                raise HTTPException(status_code=400, detail=f"Invalid or unsupported PDF format: {pdf_val_err}")
+
+        # --- Orchestrate the initial processing step ---
+        # orchestrate_file_processing now returns True/False based on the success of its initial step.
+        success, processed_doc_id, msg_proc = await orchestrate_file_processing(
+            CONFIG, temp_file_path, safe_original_filename, file_ext_from_name,
+            user_description, pipeline_preference
+        )
+
+        # --- Check the result of the orchestration ---
+        if success:
+             # If orchestration returned True, the initial step (image extraction or text prep) succeeded.
+             logger.info(f"'{original_filename}' (ID: {processed_doc_id}) upload and initial processing as '{pipeline_preference}' OK. Msg: {msg_proc}")
+
+             # Fetch the latest metadata to include in the success response and for broadcasting
+             final_meta = common_utils.get_specific_doc_metadata(CONFIG, processed_doc_id) or {}
+
+             # *** START NEW NOTIFICATION LOGIC ***
+             # Get the updated list of all vault files *after* the new file has been added
+             updated_vault_files_after_upload = common_utils.get_vault_files(CONFIG)
+             logger.info(f"Broadcasting updated file list ({len(updated_vault_files_after_upload)} files) to all active WebSocket clients after upload of {processed_doc_id}.")
+             # Iterate through all active connections and send the updated list
+             for conn_client_id_notify in list(manager.active_connections.keys()):
+                 try:
+                     # Use await manager.send_json for async send
+                     await manager.send_json(conn_client_id_notify, {"type": "available_files", "files": updated_vault_files_after_upload})
+                 except Exception as e_notify_upload:
+                     # Log any error during notification but don't fail the upload response
+                     logger.error(f"Error notifying client {conn_client_id_notify} about upload of {processed_doc_id}: {e_notify_upload}")
+             logger.info(f"Finished broadcasting file list update.")
+             # *** END NEW NOTIFICATION LOGIC ***
+
+
+             # Trigger AI metadata generation as a background task if successful
+             # It's best to trigger this *after* sending the initial success response and file list update
+             # so the user sees the file appear quickly, even if AI metadata takes longer.
+             if ollama_client and processed_doc_id:
+                 asyncio.create_task(generate_ai_metadata_and_update(CONFIG, processed_doc_id, ollama_client, common_utils))
+                 logger.info(f"Started AI metadata generation task for {processed_doc_id}.")
+
+
+             return JSONResponse(status_code=200, content={
+                 # Indicate upload is successful and processing initiated/ongoing
+                 "message": f"'{original_filename}' (ID: {processed_doc_id}) upload successful. Initial processing as '{pipeline_preference}' complete. Further processing will occur when file is selected. {msg_proc}",
+                 "doc_id": processed_doc_id,
+                 "metadata": final_meta
+             })
+        else:
+             # If orchestration returned False, the initial step failed.
+             logger.error(f"'{original_filename}' (ID: {processed_doc_id if processed_doc_id else 'N/A'}) upload failed during initial processing stage. Msg: {msg_proc}")
+             # Re-raise as HTTP 500, including the specific failure message from orchestration
+             raise HTTPException(status_code=500, detail=f"Server error during initial processing: {msg_proc}")
+
+    except HTTPException as http_e:
+        # HTTPExceptions are raised directly and don't need extra logging here
+        raise http_e
+    except Exception as e_upload:
+        logger.error(f"Upload endpoint encountered an unexpected error for '{original_filename}': {e_upload}", exc_info=True)
+        # Catch any other unexpected errors and return a generic 500
+        raise HTTPException(status_code=500, detail=f"An unexpected server error occurred during upload: {str(e_upload)[:100]}")
+    finally:
+        # Ensure the temporary file is removed, even if errors occurred
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+                logger.debug(f"Removed temporary file: {temp_file_path}")
+            except Exception as e_rem_final:
+                logger.error(f"Error removing temp file {temp_file_path} in finally block: {e_rem_final}")
+
+@app.get("/files", summary="List Vault Files")
+async def get_files_http_endpoint():
+    common_utils.initialize_vault_directory(CONFIG)
+    files = common_utils.get_vault_files(CONFIG)
+    return {"files": files}
+
+@app.delete("/delete/{doc_id_param}", summary="Delete File by ID")
+async def delete_file_http_endpoint(doc_id_param: str, client_id: Optional[str] = Form(None)):
+    global CONFIG, manager, chroma_collection
+
+    logger.info(f"HTTP Delete request received for doc_id: {doc_id_param}")
+
+    doc_meta = common_utils.get_specific_doc_metadata(CONFIG, doc_id_param)
+    original_filename_display = doc_id_param
+    pipeline_type_for_deletion = "unknown"
+    if doc_meta:
+        original_filename_display = doc_meta.get("original_filename", doc_id_param)
+        pipeline_type_for_deletion = doc_meta.get("pipeline_type", "visual")
+
+    item_deleted_from_disk = False
+    item_type_deleted_on_disk = "unknown"
+    deletion_messages = []
+
+    if pipeline_type_for_deletion == "visual" or pipeline_type_for_deletion == "unknown":
+        visual_path_to_delete = os.path.join(CONFIG["vault_directory"], CONFIG["processed_docs_subdir"], doc_id_param)
+        if os.path.isdir(visual_path_to_delete):
+            try:
+                shutil.rmtree(visual_path_to_delete)
+                item_deleted_from_disk = True
+                item_type_deleted_on_disk = "processed visual document directory"
+                logger.info(f"Deleted visual document directory: {visual_path_to_delete}")
+                deletion_messages.append(f"Visual data directory removed for '{original_filename_display}'.")
+            except Exception as e_rm_visual:
+                logger.error(f"Error deleting visual directory '{visual_path_to_delete}': {e_rm_visual}", exc_info=True)
+                deletion_messages.append(f"Error removing visual files: {e_rm_visual}")
+        elif pipeline_type_for_deletion == "visual":
+            logger.warning(f"Visual document directory not found for deletion: {visual_path_to_delete}")
+
+    if pipeline_type_for_deletion == "textual" or (pipeline_type_for_deletion == "unknown" and not item_deleted_from_disk):
+        textual_filename_to_delete = doc_meta.get("processed_path", f"{doc_id_param}_textual.txt") if doc_meta else f"{doc_id_param}_textual.txt"
+        textual_path_to_delete = os.path.join(CONFIG["vault_directory"], textual_filename_to_delete)
+        if os.path.exists(textual_path_to_delete) and os.path.isfile(textual_path_to_delete):
+            try:
+                os.remove(textual_path_to_delete)
+                item_deleted_from_disk = True
+                item_type_deleted_on_disk = "processed textual file" if item_type_deleted_on_disk == "unknown" else item_type_deleted_on_disk + " & textual file"
+                logger.info(f"Deleted textual processed file: {textual_path_to_delete}")
+                deletion_messages.append(f"Textual processed file removed for '{original_filename_display}'.")
+            except Exception as e_rm_textual:
+                logger.error(f"Error deleting textual file '{textual_path_to_delete}': {e_rm_textual}", exc_info=True)
+                deletion_messages.append(f"Error removing textual file: {e_rm_textual}")
+        elif pipeline_type_for_deletion == "textual":
+            logger.warning(f"Textual processed file not found for deletion: {textual_path_to_delete}")
+
+    if (doc_meta and doc_meta.get("pipeline_type") == "visual" and doc_meta.get("indexing_complete")) or pipeline_type_for_deletion == "visual":
+        if chroma_collection:
+            try:
+                logger.info(f"Attempting to delete entries for doc_id '{doc_id_param}' from ChromaDB collection '{chroma_collection.name}'.")
+                chroma_collection.delete(where={"doc_id": doc_id_param})
+                logger.info(f"Submitted delete request to ChromaDB for doc_id '{doc_id_param}'.")
+                deletion_messages.append(f"Vector index entries removed for '{original_filename_display}'.")
+            except Exception as e_chroma_del:
+                logger.error(f"Error deleting from ChromaDB for doc_id '{doc_id_param}': {e_chroma_del}", exc_info=True)
+                deletion_messages.append(f"Error removing vector index entries: {e_chroma_del}")
+        else:
+            logger.warning(f"Chroma collection not available, cannot delete entries for {doc_id_param}.")
+            deletion_messages.append(f"Vector index not available for cleanup of '{original_filename_display}'.")
+
+    metadata_entry_removed = common_utils.remove_doc_from_metadata(CONFIG, doc_id_param)
+    if metadata_entry_removed:
+        deletion_messages.append(f"Metadata entry removed for '{original_filename_display}'.")
+    else:
+        if not item_deleted_from_disk:
+            logger.warning(f"Doc ID '{doc_id_param}' not found on disk and also not found in metadata for removal.")
+            raise HTTPException(status_code=404, detail=f"Document ID '{doc_id_param}' not found anywhere to delete.")
+        else:
+            logger.info(f"Doc ID '{doc_id_param}' deleted from disk, but was not found in metadata (or already removed).")
+            deletion_messages.append(f"Metadata entry for '{original_filename_display}' was not found (possibly already removed).")
+
+    manager.cleanup_file_data(doc_id_param)
+    logger.info(f"Cleaned client session data for deleted doc_id: {doc_id_param}")
+
+    updated_vault_files_after_delete = common_utils.get_vault_files(CONFIG)
+    for conn_client_id_notify in list(manager.active_connections.keys()):
+        try:
+            await manager.send_json(conn_client_id_notify, {"type": "available_files", "files": updated_vault_files_after_delete})
+            if conn_client_id_notify == client_id:
+                await manager.send_json(client_id, {
+                    "type": "file_deleted",
+                    "filename": doc_id_param,
+                    "message": f"Document '{original_filename_display}' (ID: {doc_id_param}) deletion processed."
+                })
+        except Exception as e_notify_del:
+            logger.error(f"Error notifying client {conn_client_id_notify} about deletion of {doc_id_param}: {e_notify_del}")
+    
+    final_status_message = f"Deletion process for '{original_filename_display}' (ID: {doc_id_param}) completed. Details: {' '.join(deletion_messages)}"
+    logger.info(final_status_message)
+    return JSONResponse(status_code=200, content={"success": True, "message": final_status_message})
+
+@app.websocket("/ws/{client_id}")
+async def websocket_endpoint(websocket: WebSocket, client_id: str):
+    """Handles incoming WebSocket connections and message routing."""
+    global manager, ollama_client, CONFIG, common_utils, textual_pipeline, visual_pipeline, system_message, chroma_collection
+
+    await manager.connect(websocket, client_id)
+    logger.info(f"Client {client_id} connected.")
+
+    try:
+        await manager.send_json(client_id, {"type": "status", "message": "Connected."})
+        available_files_list = common_utils.get_vault_files(CONFIG)
+        await manager.send_json(client_id, {"type": "available_files", "files": available_files_list})
+        logger.info(f"Sent {len(available_files_list)} available files to client {client_id}.")
+
+        while True:
+            message_data = await websocket.receive_json()
+            message_type = message_data.get("type")
+            logger.debug(f"WS Received from {client_id}: Type='{message_type}', Data='{str(message_data)[:100]}...'")
+
+            if message_type == "chat":
+                await handle_chat_message(
+                    websocket,
+                    message_data,
+                    client_id,
+                    manager,
+                    ollama_client,
+                    CONFIG,
+                    common_utils,
+                    textual_pipeline,
+                    visual_pipeline,
+                    system_message,
+                    chroma_collection  # FIX: Added chroma_collection
+                )
+                logger.debug(f"Dispatched chat message for {client_id}")
+
+            elif message_type == "select_files":
+                await handle_file_selection(
+                    websocket,
+                    message_data,
+                    client_id,
+                    manager,
+                    CONFIG,
+                    chroma_collection,
+                    common_utils,
+                    textual_pipeline,
+                    visual_pipeline
+                )
+                logger.debug(f"Dispatched select_files message for {client_id}")
+
+            elif message_type == "delete_file":
+                logger.warning(f"Delete file message received from {client_id}, handler not yet implemented or called.")
+                await manager.send_json(client_id, {"type": "status", "message": "Delete file message received, handler not yet implemented."})
+
+            elif message_type == "ping":
+                await manager.send_json(client_id, {"type": "pong"})
+                logger.debug(f"Sent pong response for JSON ping from {client_id}")
+
+            else:
+                logger.warning(f"Unknown message type from {client_id}: {message_type}. Message data: {message_data}")
+                safe_error_message = html.escape(f"Unknown message type received: {message_type}")
+                await manager.send_json(client_id, {"type": "error", "message": safe_error_message})
+
+    except WebSocketDisconnect as e:
+        logger.info(f"Client {client_id} disconnected with code: {e.code}, reason: {e.reason}")
+        manager.disconnect(client_id)
+
+    except Exception as e:
+        logger.error(f"Unhandled exception in WebSocket connection for {client_id}: {e}", exc_info=True)
+        try:
+            safe_error_message = html.escape(f"Internal server error occurred: {str(e)}")
+            await manager.send_json(client_id, {"type": "error", "message": safe_error_message})
+        except Exception:
+            pass
+        manager.disconnect(client_id)
+
+async def process_websocket_message(data_str: str, client_id: str):
+    try:
+        message_data = json.loads(data_str)
+        msg_type = message_data.get("type", "")
+        logger.debug(f"WS Processing type '{msg_type}' for {client_id}")
+        if msg_type == "chat":
+            await handle_chat_message(message_data, client_id)
+        elif msg_type == "select_files":
+            await handle_file_selection(message_data, client_id)
+        elif msg_type == "ping":
+            await manager.send_json(client_id, {"type": "pong"})
+        else:
+            await manager.send_json(client_id, {"type": "error", "message": f"Unknown WS msg type: {msg_type}"})
+    except json.JSONDecodeError:
+        logger.error(f"Invalid JSON from {client_id}: {data_str[:100]}", exc_info=True)
+        await manager.send_json(client_id, {"type": "error", "message": "Invalid JSON format received."})
+    except Exception as e_proc_ws:
+        logger.error(f"Error processing WS message from {client_id}: {e_proc_ws}", exc_info=True)
+        await manager.send_json(client_id, {"type": "error", "message": f"Server error processing message: {e_proc_ws}"})
+
+async def handle_file_selection(
+    websocket: WebSocket,
+    message_data: dict,
+    client_id: str,
+    manager: Any,
+    config_dict: Dict,
+    chroma_collection: Any, # Correctly passed
+    common_utils_module: Any, # Correctly passed
+    textual_pipeline_module: Any,
+    visual_pipeline_module: Any # Contains the updated functions
+):
+    try:
+        requested_doc_ids = message_data.get("files", [])
+        logger.info(f"WS: Client {client_id} selected docs: {requested_doc_ids}")
+
+        if not isinstance(requested_doc_ids, list):
+            await manager.send_json(client_id, {"type": "error", "message": "Invalid file selection format."})
+            logger.warning(f"Client {client_id} sent invalid file selection format: {message_data}")
+            return
+
+        all_meta = common_utils_module.get_vault_files(config_dict)
+        valid_selection = [doc_id for doc_id in requested_doc_ids if isinstance(doc_id, str) and any(m.get("filename") == doc_id for m in all_meta)]
+
+        manager.set_client_files(client_id, valid_selection)
+        # Note: You might want to clear embeddings/content only for *removed* files, not the whole selection
+        # But clearing seems safer to avoid stale data from previously selected files.
+        manager.set_client_content(client_id, {})
+        manager.set_client_embeddings(client_id, {})
+        logger.info(f"Client {client_id} session data reset for new selection. Valid IDs: {valid_selection}")
+
+        if not valid_selection:
+            await manager.send_json(client_id, {"type": "status", "message": "Selection cleared."})
+            logger.info(f"Client {client_id} cleared selection.")
+            return
+
+        await manager.send_json(client_id, {"type": "status", "message": f"Processing {len(valid_selection)} selected document(s)..."})
+
+        visual_ready_c = 0
+        textual_ready_c = 0
+        failed_names = []
+
+        for doc_id in valid_selection:
+            meta = common_utils_module.get_specific_doc_metadata(config_dict, doc_id)
+            # Re-fetch meta inside the loop to get the latest status after each step
+            meta = common_utils_module.get_specific_doc_metadata(config_dict, doc_id)
+            if not meta:
+                logger.warning(f"Metadata not found for selected doc ID {doc_id}. Cannot process.")
+                failed_names.append(f"{doc_id}(NoMeta)")
+                continue
+
+            display_name = meta.get("original_filename", doc_id)
+            pipeline_type = meta.get("pipeline_type", "visual") # Default to visual if type is missing
+
+            logger.info(f"Processing '{display_name}' (ID: {doc_id}) via '{pipeline_type}' pipeline for client {client_id}.")
+            await manager.send_json(client_id, {"type": "status", "message": f"Checking processing status for '{display_name}'..."})
+
+            processed_ok_flag = False
+            current_step = meta.get("pipeline_step", "unknown")
+
+            # --- Check status and trigger processing steps for Visual Pipeline ---
+            if pipeline_type == "visual":
+                # Visual requires indexing_complete and pipeline_step='indexing_complete' or 'indexing_complete_no_chunks'
+                is_indexed = meta.get("indexing_complete", False)
+                is_indexed_status = current_step in ["indexing_complete", "indexing_complete_no_chunks"]
+                requires_processing = not (is_indexed and is_indexed_status)
+
+                if requires_processing:
+                    logger.debug(f"Visual pipeline for {doc_id} requires processing. Current step: {current_step}")
+                    try:
+                        # Trigger steps sequentially if not completed
+                        # Note: Each step updates metadata and returns success/failure indicator (path or None, True/False)
+                        # The step functions themselves handle logging and basic metadata status updates on success/failure
+
+                        # Step 3: Layout Analysis (using LayoutParser)
+                        if current_step not in ["layout_analysis_complete", "ocr_extraction_complete", "indexing_complete", "indexing_complete_no_chunks"]:
+                             layout_success_path = await visual_pipeline_module.perform_layout_analysis(doc_id, config_dict, common_utils_module)
+                             if not layout_success_path:
+                                 # Error logged inside, metadata status updated inside
+                                 raise Exception("Layout analysis failed.")
+                             # Re-fetch meta to get updated status
+                             meta = common_utils_module.get_specific_doc_metadata(config_dict, doc_id) or meta
+                             current_step = meta.get("pipeline_step", "unknown")
+                             await manager.send_json(client_id, {"type": "status", "message": f"Layout analysis done for '{display_name}'."})
+
+
+                        # Step 4: OCR Extraction (using LayoutParser regions)
+                        if current_step not in ["ocr_extraction_complete", "indexing_complete", "indexing_complete_no_chunks"]:
+                             # This step needs to read the layout analysis file
+                             ocr_success_path = await visual_pipeline_module.perform_ocr_extraction(doc_id, config_dict, common_utils_module)
+                             if not ocr_success_path:
+                                 # Error logged inside, metadata status updated inside
+                                 raise Exception("OCR extraction failed.")
+                             # Re-fetch meta
+                             meta = common_utils_module.get_specific_doc_metadata(config_dict, doc_id) or meta
+                             current_step = meta.get("pipeline_step", "unknown")
+                             await manager.send_json(client_id, {"type": "status", "message": f"OCR extraction done for '{display_name}'."})
+
+
+                        # Step 5: Indexing (using LayoutParser-based chunks)
+                        if current_step not in ["indexing_complete", "indexing_complete_no_chunks"]:
+                             # This step needs to read the ocr_results file and call the chunking function
+                             # It also needs chroma_collection
+                             index_success = await visual_pipeline_module.index_ocr_data(doc_id, config_dict, chroma_collection, common_utils_module)
+                             if not index_success:
+                                 # Error logged inside, metadata status updated inside
+                                 raise Exception("Indexing failed.")
+                             # Re-fetch meta
+                             meta = common_utils_module.get_specific_doc_metadata(config_dict, doc_id) or meta
+                             current_step = meta.get("pipeline_step", "unknown")
+                             await manager.send_json(client_id, {"type": "status", "message": f"Indexing done for '{display_name}'."})
+
+
+                        # Final check after attempting all steps
+                        if meta.get("indexing_complete"):
+                            processed_ok_flag = True
+                            logger.info(f"Visual pipeline processing steps successful or already complete for {doc_id}")
+                        else:
+                             # This could happen if indexing_complete somehow wasn't set true despite index_success being true
+                             # Or if an error occurred in a previous step but wasn't caught/re-raised properly.
+                             # Let's treat it as a failure here.
+                             logger.error(f"Visual processing for {doc_id} finished steps but indexing_complete is still False. Current step: {current_step}")
+                             raise Exception(f"Visual processing finished but indexing status incomplete ({current_step}).")
+
+
+                    except Exception as e_visual_proc:
+                        logger.error(f"Error during visual pipeline processing chain for {doc_id}: {e_visual_proc}", exc_info=True)
+                        failed_names.append(f"{display_name}(VisualProcFail: {str(e_visual_proc)[:50]})")
+                        # Metadata update for the failure step is handled within the step functions
+                        # A final catch-all update might be useful if status wasn't set correctly
+                        meta_after_fail = common_utils_module.get_specific_doc_metadata(config_dict, doc_id) or {}
+                        if not meta_after_fail.get("pipeline_step", "").startswith("visual_failed"):
+                            common_utils_module.update_file_metadata(config_dict, doc_id, metadata_extra={"pipeline_step": f"visual_failed_chain_{e_visual_proc.__class__.__name__}"})
+
+
+                else:
+                    # Document was already indexed according to metadata
+                    processed_ok_flag = True
+                    logger.info(f"Visual document {doc_id} already indexed. Ready for chat.")
+
+
+                if processed_ok_flag:
+                    visual_ready_c += 1
+
+
+            # --- Check status and trigger processing steps for Textual Pipeline ---
+            elif pipeline_type == "textual":
+                # Textual requires content loaded into session manager and embeddings generated
+                is_content_loaded = doc_id in manager.get_client_content(client_id)
+                is_embeddings_generated = doc_id in manager.get_client_embeddings(client_id)
+                requires_processing = not (is_content_loaded and is_embeddings_generated)
+
+                if requires_processing:
+                    logger.debug(f"Textual pipeline for {doc_id} requires session loading. Current step: {current_step}")
+                    try:
+                         # This part seems correct for loading/embedding textual data into session
+                        content = textual_pipeline_module.read_vault_content_textual(config_dict, [doc_id], all_meta)
+                        if not content or doc_id not in content:
+                            # textual_pipeline_module.read_vault_content_textual should log failure
+                            raise Exception("Failed to read textual content.")
+
+                        embeddings = await textual_pipeline_module.generate_vault_embeddings_textual(
+                            config_dict,
+                            content,
+                            client_id,
+                            manager,
+                            common_utils_module,
+                            ollama_client # Assuming ollama_client is available
+                        )
+                        if not embeddings or doc_id not in embeddings:
+                             # textual_pipeline_module.generate_vault_embeddings_textual should log failure
+                            raise Exception("Failed to generate embeddings.")
+
+                        # Update manager session data
+                        current_content = manager.get_client_content(client_id)
+                        current_content.update(content)
+                        manager.set_client_content(client_id, current_content)
+
+                        current_embeddings = manager.get_client_embeddings(client_id)
+                        current_embeddings.update(embeddings)
+                        manager.set_client_embeddings(client_id, current_embeddings)
+
+                        textual_ready_c += 1
+                        processed_ok_flag = True
+                        # Update metadata to indicate session data loaded status (optional, can just rely on session manager state)
+                        common_utils_module.update_file_metadata(config_dict, doc_id, metadata_extra={"pipeline_step": "textual_data_loaded_for_session"})
+                        logger.info(f"Textual document {doc_id} loaded and embeddings generated for session {client_id}.")
+
+                    except Exception as e_textual_proc:
+                        logger.error(f"Error during textual session loading/embedding for doc_id {doc_id}: {e_textual_proc}", exc_info=True)
+                        failed_names.append(f"{display_name}(TextProcFail: {str(e_textual_proc)[:50]})")
+                        # Metadata update for the failure step might be needed here if not in textual_pipeline functions
+                        meta_after_fail = common_utils_module.get_specific_doc_metadata(config_dict, doc_id) or {}
+                        if not meta_after_fail.get("pipeline_step", "").startswith("textual_failed"):
+                            common_utils_module.update_file_metadata(config_dict, doc_id, metadata_extra={"pipeline_step": f"textual_failed_session_{e_textual_proc.__class__.__name__}"})
+
+                else:
+                    # Document session data was already loaded
+                    processed_ok_flag = True
+                    textual_ready_c += 1
+                    logger.info(f"Textual document {doc_id} session data already loaded. Ready for chat.")
+
+            else:
+                # This case should ideally not happen if pipeline_preference is validated on upload
+                logger.error(f"Unknown pipeline type '{pipeline_type}' for doc ID {doc_id} during selection handling.")
+                failed_names.append(f"{display_name}(UnknownPipeline)")
+
+
+            # Send status update for the specific doc
+            await manager.send_json(client_id, {"type": "status", "message": f"'{display_name}' processing check complete (Ready: {processed_ok_flag})."})
+
+
+        final_parts = []
+        if visual_ready_c > 0:
+            final_parts.append(f"{visual_ready_c} visual")
+        if textual_ready_c > 0:
+            final_parts.append(f"{textual_ready_c} textual")
+
+        final_msg_text = f"Selected documents processed: {', '.join(final_parts) if final_parts else 'None'} ready."
+        if failed_names:
+            final_msg_text += f" Issues with: {'; '.join(failed_names)}." # Use semicolon for clarity
+
+        await manager.send_json(client_id, {"type": "status", "message": final_msg_text})
+        logger.info(f"WS: File selection processing for {client_id} finished. {final_msg_text}")
+
+    except Exception as e_select_main:
+        logger.error(f"WS: Unhandled exception in handle_file_selection for {client_id}: {e_select_main}", exc_info=True)
+        error_message = f"An unexpected server error occurred during file selection: {str(e_select_main)}"
+        safe_error_message = html.escape(error_message)
+        await manager.send_json(client_id, {
+            "type": "error",
+            "message": safe_error_message,
+            "client_id": client_id
+        })
+
+async def handle_chat_message(
+    websocket: WebSocket,
+    message_data: dict,
+    client_id: str,
+    manager: Any, # ConnectionManager instance
+    ollama_client: Optional[OpenAI], # Ollama client instance
+    CONFIG: Dict, # Main configuration dictionary
+    common_utils: Any, # common_utils module reference
+    textual_pipeline: Any, # textual_pipeline module reference
+    visual_pipeline: Any, # visual_pipeline module reference (contains ollama_chat_visual_async)
+    system_message: str, # The strict system message string
+    chroma_collection: Any # ChromaDB collection object
+):
+    """
+    Handles incoming chat messages from WebSocket clients.
+    Determines which documents are targeted and ready, selects pipeline (visual/textual),
+    calls the appropriate chat orchestrator, and sends the response back to the client.
+    """
+    try:
+        user_message = message_data.get("message", "").strip()
+        if not user_message:
+            await manager.send_json(client_id, {"type": "error", "message": "Empty message."})
+            logger.warning(f"Client {client_id} sent empty chat message.")
+            return
+
+        logger.info(f"WS Chat from {client_id}: '{user_message[:50]}...'")
+        await manager.send_json(client_id, {"type": "status", "message": "Processing query..."})
+
+        # Get the list of documents currently selected by this client
+        session_selection = manager.get_client_files(client_id)
+        if not session_selection:
+            logger.info(f"No documents selected for client {client_id}. Sending no-info response.")
+            # Generate a response indicating no docs are selected
+            all_meta_for_no_info = common_utils.get_vault_files(CONFIG)
+            msg = common_utils.generate_no_information_response(CONFIG, user_message, [], all_meta_for_no_info)
+            await manager.send_json(client_id, {"type": "chat_response", "message": msg, "context": []})
+            return
+
+        # Parse query to see if specific files are requested, otherwise use session selection
+        all_meta = common_utils.get_vault_files(CONFIG)
+        cleaned_query, query_targets = common_utils.parse_file_query(CONFIG, user_message, all_meta, session_selection)
+        final_targets = query_targets if query_targets else session_selection # Use parsed targets or selected files
+
+        if not final_targets:
+            logger.info(f"Query parsing resulted in no targets for client {client_id}. Sending no-info response.")
+            # Generate a response indicating no relevant docs were found or targeted
+            msg = common_utils.generate_no_information_response(CONFIG, cleaned_query, [], all_meta)
+            await manager.send_json(client_id, {"type": "chat_response", "message": msg, "context": []})
+            return
+
+        logger.info(f"Chat targets for '{cleaned_query[:50]}...': {final_targets}")
+
+        # Check readiness of targeted documents
+        visual_ready, textual_ready, not_ready = [], [], []
+        session_text_emb = manager.get_client_embeddings(client_id)
+        session_text_cont = manager.get_client_content(client_id)
+
+        for doc_id in final_targets:
+            meta = common_utils.get_specific_doc_metadata(CONFIG, doc_id)
+            if not meta:
+                logger.warning(f"Metadata not found for targeted doc ID {doc_id}")
+                not_ready.append(f"{doc_id}(NoMeta)")
+                continue
+
+            p_type = meta.get("pipeline_type", "visual") # Default to visual if type is missing
+
+            # A visual document is ready if its metadata indicates indexing is complete.
+            if p_type == "visual" and meta.get("indexing_complete", False) and meta.get("pipeline_step") in ["indexing_complete", "indexing_complete_no_chunks"]:
+                 visual_ready.append(doc_id)
+            # A textual document is ready if its content and embeddings are loaded into the session manager.
+            elif p_type == "textual" and doc_id in session_text_cont and doc_id in session_text_emb:
+                textual_ready.append(doc_id)
+            else:
+                # Document is targeted but not ready. Log status details.
+                logger.warning(f"Targeted doc {doc_id} ('{meta.get('original_filename', doc_id)}') not ready. Pipeline type: {p_type}, Indexing Complete: {meta.get('indexing_complete',False)}, Pipeline Step: {meta.get('pipeline_step','UnknownStep')}")
+                status_detail = meta.get('pipeline_step', 'Unknown')
+                if p_type == 'visual' and not meta.get('indexing_complete'):
+                    status_detail = meta.get('pipeline_step', 'Indexing Incomplete') # More specific if visual indexing failed/incomplete
+                if p_type == 'textual' and (doc_id not in session_text_cont or doc_id not in session_text_emb):
+                    status_detail = 'Content/Embeddings Not Loaded' # More specific if textual session loading failed
+                not_ready.append(f"{meta.get('original_filename', doc_id)}({status_detail})")
+
+
+        # If no documents are ready (either visual or textual), send a message indicating this.
+        if not visual_ready and not textual_ready:
+            logger.warning(f"No targeted documents were ready for chat for client {client_id}. Not ready: {not_ready}")
+            msg_parts = ["<p>The targeted document(s) are not yet ready for chat.</p>"]
+            if not_ready:
+                msg_parts.append("<p>Not ready status:</p><ul>")
+                for item in not_ready:
+                    msg_parts.append(f"<li>{html.escape(item)}</li>")
+                msg_parts.append("</ul>")
+            msg_parts.append("<p>Please ensure files are fully processed/loaded before querying them.</p>")
+            final_unready_msg = "".join(msg_parts)
+            await manager.send_json(client_id, {"type": "chat_response", "message": final_unready_msg, "context": []})
+            return # Exit the handler if no documents are ready
+
+        # --- Determine which pipeline to use and call the appropriate orchestrator ---
+        # Prioritize visual if any visual documents are ready.
+        raw_resp_text = ""
+        ctx_used: List[Dict] = [] # List of context items returned by the orchestrator
+
+        # Check if ChromaDB is available if the Visual pipeline is the one to be used.
+        if visual_ready: # If any visual docs are ready, we will attempt the visual pipeline
+            if not chroma_collection:
+                 logger.error("ChromaDB collection not available, cannot run visual chat.")
+                 await manager.send_json(client_id, {"type": "error", "message": "Document index not initialized for visual chat."})
+                 return # Exit the handler if visual is needed but Chroma is down
+
+            if textual_ready: # Log if textual documents are ready but being ignored for visual
+                logger.warning(f"Visual targets ({visual_ready}) available; textual targets ({textual_ready}) ignored in favor of visual pipeline.")
+
+            try:
+                # --- CALL THE VISUAL CHAT ORCHESTRATOR ---
+                logger.info(f"Calling visual pipeline chat orchestrator for {client_id} with {len(visual_ready)} documents.")
+                raw_resp_text, ctx_used = await asyncio.wait_for(
+                    visual_pipeline.ollama_chat_visual_async(
+                        config_dict=CONFIG, # Pass the main config dictionary
+                        user_input=cleaned_query, # Pass the cleaned user query
+                        selected_doc_ids=visual_ready, # Pass ONLY the list of READY visual doc IDs
+                        client_id=client_id, # Pass the client ID
+                        ollama_client=ollama_client, # Pass the Ollama client instance
+                        system_message=system_message, # Pass the strict global system message string
+                        manager=manager, # Pass the connection manager instance
+                        common_utils_module=common_utils, # Pass the common_utils module reference
+                        chroma_collection_obj=chroma_collection, # Pass the ChromaDB collection object
+                        # page_filter=None # Optional parameter, include if you implement page-specific queries
+                    ),
+                    timeout=CONFIG.get("chat_timeout", 60.0) # Use config for timeout, default 60s
+                )
+                logger.info(f"Visual chat pipeline returned for client {client_id}.")
+            except asyncio.TimeoutError:
+                logger.error(f"Visual pipeline timed out for client {client_id}.")
+                # Send timeout error message to client
+                await manager.send_json(client_id, {"type": "error", "message": f"Query timed out ({CONFIG.get('chat_timeout', 60.0)}s) while processing visual documents. Please try again."})
+                return # Exit the handler after timeout
+
+            except Exception as e:
+                logger.error(f"Visual pipeline failed for {client_id}: {e}", exc_info=True)
+                # Send failure error message to client
+                await manager.send_json(client_id, {"type": "error", "message": f"Failed to process visual documents: {str(e)[:100]}. Check document indexing status for selected files."})
+                return # Exit the handler after visual failure
+
+        # --- Fallback to Textual if no visual documents were ready ---
+        elif textual_ready: # This block is executed ONLY if visual_ready is empty but textual_ready is not
+            try:
+                # --- CALL THE TEXTUAL CHAT ORCHESTRATOR ---
+                logger.info(f"Calling textual pipeline chat orchestrator for {client_id} with {len(textual_ready)} documents.")
+                logger.debug(f"Textual pipeline args: config_dict={CONFIG}, query={cleaned_query}, doc_ids={textual_ready}, session_embeddings=..., session_content=..., client_id={client_id}, system_message=...")
+                raw_resp_text, ctx_used = await asyncio.wait_for(
+                    textual_pipeline.ollama_chat_textual_async(
+                        config_dict=CONFIG, # Pass the config
+                        query=cleaned_query, # Pass the user query
+                        doc_ids=textual_ready, # Pass ONLY the list of READY textual doc IDs
+                        session_embeddings=session_text_emb, # Session data for textual
+                        session_content=session_text_cont, # Session data for textual
+                        client_id=client_id, # Pass the client ID
+                        ollama_client=ollama_client, # Pass the Ollama client
+                        manager=manager, # Pass manager
+                        common_utils_module=common_utils, # Pass common_utils
+                        system_message_str=system_message # Pass the strict system message string
+                    ),
+                    timeout=CONFIG.get("chat_timeout", 60.0) # Use config for timeout, default 60s
+                )
+                logger.info(f"Textual chat pipeline returned for client {client_id}.")
+            except asyncio.TimeoutError:
+                logger.error(f"Textual pipeline timed out for client {client_id}.")
+                # Send timeout error message to client
+                await manager.send_json(client_id, {"type": "error", "message": f"Query timed out ({CONFIG.get('chat_timeout', 60.0)}s) while processing textual documents. Please try again."})
+                return # Exit the handler after timeout
+
+            except Exception as e:
+                logger.error(f"Textual pipeline failed for {client_id}: {e}", exc_info=True)
+                # Send failure error message to client
+                await manager.send_json(client_id, {"type": "error", "message": f"Failed to process textual documents: {str(e)[:100]}"})
+                return # Exit the handler after textual failure
+
+        # --- Handle case where neither pipeline ran (should be caught by initial check, but safety) ---
+        else:
+            # This else block should only be reached if both visual_ready and textual_ready were empty.
+            # This scenario should have been handled by the check near the start of the function.
+            logger.error(f"Logic error: Neither visual nor textual documents were ready after readiness check for client {client_id}. This state should have triggered an early return.")
+            raw_resp_text = "<p>Server routing error: No ready documents found after readiness check.</p>"
+            ctx_used = [] # Ensure ctx_used is empty list on error
+            # Send error message to client
+            await manager.send_json(client_id, {
+                 "type": "error",
+                 "message": raw_resp_text,
+                 "client_id": client_id
+            })
+            return # Exit the handler
+
+
+        # --- Post-processing and Sending Response (This section executes ONLY if one of the pipelines returned successfully) ---
+
+        # The chat orchestrator functions (ollama_chat_visual_async and ollama_chat_textual_async)
+        # are now responsible for deciding if they found relevant info and structuring the response.
+        # If they return an empty ctx_used, it implies no relevant chunks were found or used,
+        # and the raw_resp_text should reflect this (based on the strict system message).
+
+        if not ctx_used:
+             logger.warning(f"No document context was returned by the pipeline for query '{cleaned_query[:50]}...' in docs {final_targets}. The LLM is expected to handle this.")
+             # The raw_resp_text should contain the LLM's response indicating no info found.
+             # We just ensure ctx_used is an empty list for the client response.
+             ctx_used = [] # Ensure ctx_used is an empty list
+
+        # Ensure raw_resp_text is not None before passing to clean_response_language
+        processed_html_response = common_utils.clean_response_language(CONFIG, raw_resp_text if raw_resp_text is not None else "An error occurred.")
+        logger.debug(f"Cleaned response for client {client_id}: {processed_html_response[:100]}...")
+
+        # Ensure ctx_used is a list before sending
+        await manager.send_json(client_id, {
+            "type": "chat_response",
+            "message": processed_html_response,
+            "context": ctx_used if isinstance(ctx_used, list) else [] # Ensure it's a list
+        })
+        logger.info(f"Final chat response sent for '{cleaned_query[:50]}...' to client {client_id}. Context items sent: {len(ctx_used) if isinstance(ctx_used, list) else 'N/A'}.")
+
+    except Exception as e:
+        # This catch block handles unexpected exceptions *outside* of the pipeline calls themselves
+        logger.error(f"Unhandled exception in handle_chat_message for {client_id}: {e}", exc_info=True)
+        safe_error_message = html.escape(f"Unexpected server error in chat handler: {str(e)[:100]}")
+        await manager.send_json(client_id, {
+            "type": "error",
+            "message": safe_error_message,
+            "client_id": client_id
+        })
+
+async def ollama_chat_visual_async(
+    user_input: str,
+    selected_doc_ids: List[str],
+    client_id: str
+) -> Tuple[str, List[Dict]]:
+    global ollama_client, manager, CONFIG, common_utils, visual_pipeline, chroma_collection
+    logger.info(f"--- Visual Chat Orchestrator for {client_id} --- Query: '{user_input[:50]}' Docs: {selected_doc_ids}")
+    if not ollama_client:
+        return "LLM client not ready.", []
+    if not selected_doc_ids:
+        return "No visual documents selected for this query.", []
+    memory = manager.get_client_memory(client_id)
+    chat_history_lc_msgs = []
+    if memory:
+        try:
+            loaded_vars = memory.load_memory_variables({})
+            chat_history_lc_msgs = loaded_vars.get(memory.memory_key, [])
+        except Exception:
+            pass
+    formatted_history = [{"role": "user" if isinstance(m, HumanMessage) else "assistant", "content": m.content} for m in chat_history_lc_msgs if hasattr(m, 'content')]
+    await manager.send_json(client_id, {"type": "status", "message": f"Searching {len(selected_doc_ids)} visual document(s)..."})
+    all_visual_context = []
+    for doc_id_visual in selected_doc_ids:
+        context_for_doc = await visual_pipeline.get_visual_context_chroma(
+            doc_id=doc_id_visual,
+            query=user_input,
+            config_dict=CONFIG,
+            chroma_collection_obj=chroma_collection,
+            top_k=max(1, CONFIG.get("visual_context_results", 15) // len(selected_doc_ids))
+        )
+        all_visual_context.extend(context_for_doc)
+    all_visual_context.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+    relevant_ocr_chunks = all_visual_context[:CONFIG.get("visual_context_results", 15)]
+    setattr(ollama_chat_visual_async, 'last_context', relevant_ocr_chunks)
+
+    if not relevant_ocr_chunks:
+        all_vault_meta = common_utils.get_vault_files(CONFIG)
+        no_info_html = common_utils.generate_no_information_response(CONFIG, user_input, selected_doc_ids, all_vault_meta)
+        if memory:
+            memory.save_context({"input": user_input}, {"output": no_info_html})
+        return no_info_html, []
+    
+    context_str_for_llm = ""
+    grouped_by_doc_page_prompt = {}
+    for ctx_chunk_prompt in relevant_ocr_chunks:
+        meta_prompt = ctx_chunk_prompt.get("metadata", {})
+        doc_name_prompt = meta_prompt.get('original_filename', meta_prompt.get('doc_id', 'Unknown'))
+        page_num_prompt = meta_prompt.get('page_number', 'N/A')
+        key_prompt = (doc_name_prompt, page_num_prompt)
+        grouped_by_doc_page_prompt.setdefault(key_prompt, []).append(ctx_chunk_prompt['content'])
+    context_parts = []
+    for (doc_name_p, page_num_p), texts_p in sorted(grouped_by_doc_page_prompt.items()):
+        page_ref_p = f"(Page {page_num_p})" if page_num_p != 'N/A' and page_num_p is not None else ""
+        page_header = f"--- Context from Document: {doc_name_p} {page_ref_p} ---"
+        page_content = "\n\n".join(texts_p)
+        context_parts.append(f"{page_header}\n{page_content}\n--- End Context from {doc_name_p} {page_ref_p} ---")
+    context_str_for_llm = "\n\n".join(context_parts)
+
+    system_prompt_visual_payload = f"""You are a meticulous Information Retrieval Assistant... (Your full detailed visual prompt from previous response) ...
+    --- Conversation History ---
+    {json.dumps(formatted_history)}
+    --- Provided Context from Files (OCR Results) ---
+    {context_str_for_llm if context_str_for_llm else "No relevant context provided."}
+    --- End Provided Context ---
+    User Query: "{user_input}"
+    Answer based *only* on the context and history, following all rules.
+    Assistant Response:"""
+    
+    messages_for_api = [{"role": "system", "content": system_prompt_visual_payload}]
+    await manager.send_json(client_id, {"type": "status", "message": "Generating visual response..."})
+    try:
+        llm_response_obj = await asyncio.to_thread(
+            lambda: ollama_client.chat.completions.create(
+                model=CONFIG["ollama_model"],
+                messages=messages_for_api,
+                temperature=0.05,
+                top_p=0.7
+            )
+        )
+        raw_response = llm_response_obj.choices[0].message.content.strip()
+        final_response_html = common_utils.clean_response_language(CONFIG, raw_response)
+        if memory:
+            memory.save_context({"input": user_input}, {"output": final_response_html})
+        common_utils.track_response_quality(CONFIG, user_input, final_response_html, relevant_ocr_chunks, client_id)
+        return final_response_html, relevant_ocr_chunks
+    except Exception as e_llm_visual:
+        logger.error(f"LLM call error in visual chat: {e_llm_visual}", exc_info=True)
+        return f"Error from Language Model (Visual): {str(e_llm_visual)[:100]}", []
+
+ollama_chat_visual_async.last_context = []
+
+if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
+    SERVER_HOST = os.environ.get("HOST", "0.0.0.0")
+    SERVER_PORT = int(os.environ.get("PORT", 8000))
+    RELOAD_DEV_MODE = os.environ.get("RELOAD", "true").lower() == "true"
+    
+    print("--- Starting Chatbot API Server ---")
+    print(f"Host: {SERVER_HOST}, Port: {SERVER_PORT}, Reload: {RELOAD_DEV_MODE}")
+    print(f"Vault: {os.path.abspath(CONFIG['vault_directory'])}")
+    print(f"Log: {os.path.abspath(CONFIG['log_file'])} ({CONFIG['log_level']})")
+    print(f"GPU: {has_gpu} ({device})")
+    
+    if not PYMUPDF_AVAILABLE:
+        print("⚠️ PyMuPDF (fitz) not available. Visual PDF processing WILL FAIL.")
+    
+    uvicorn.run(
+        "chatbot_api:app",
+        host=SERVER_HOST,
+        port=SERVER_PORT,
+        reload=RELOAD_DEV_MODE,
+        reload_dirs=["./"] if RELOAD_DEV_MODE else None,
+        reload_includes=["*.py"] if RELOAD_DEV_MODE else None,
+        reload_excludes=["*_client*.py", "temp_uploads/*", "response_tracking/*", "vault_files/*", "*.log", "vector_store/*", "__pycache__/*"] if RELOAD_DEV_MODE else None,
+        log_level=CONFIG["log_level"].lower(),
+        ws_ping_interval=60,
+        ws_ping_timeout=120,
+        timeout_keep_alive=75
+    )         
         # Limit text to reasonable size
         text = text[:8000]  # First 8K chars
         
@@ -2547,127 +1534,61 @@ Content:
 
 Summary:"""
         
-        # Call Ollama API
+        # Call Ollama API - Fix: Use ollama.chat() instead of ollama.chat.completions.create()
         response = await asyncio.to_thread(
-            lambda: ollama.chat.completions.create(
+            lambda: ollama.chat(
                 model=CONFIG["ollama_model"],
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3  # Lower temperature for factual summary
+                options={
+                    "temperature": 0.3  # Lower temperature for factual summary
+                }
             )
         )
         
-        # Extract summary from response
-        summary = response.choices[0].message.content.strip()
+        # Extract summary from response - Fix: Update response structure access
+        summary = response["message"]["content"].strip()
         return summary
     except Exception as e:
         logger.error(f"Error generating summary: {str(e)}")
         logger.error(traceback.format_exc())
         return "Summary generation failed. The document was processed but no summary is available."
 
-@app.get("/chat/{chat_id}", summary="Get Chat History")
-async def get_chat_history(chat_id: str):
-    try:
-        # Check if we should return all chats
-        if chat_id == "all":
-            # Get all files in chat history directory
-            all_chats = []
-            chat_dir = CONFIG["chat_history_directory"]
-            
-            if os.path.exists(chat_dir):
-                for filename in os.listdir(chat_dir):
-                    if filename.endswith('.json'):
-                        try:
-                            chat_id = filename.replace('.json', '')
-                            chat_data = load_chat_history(chat_id)
-                            if chat_data:
-                                # Create a summary object with essential info
-                                messages = chat_data.get("messages", [])
-                                last_message = ""
-                                if messages:
-                                    last_message = messages[-1].get("content", "")
-                                    if len(last_message) > 100:
-                                        last_message = last_message[:100] + "..."
-                                        
-                                all_chats.append({
-                                    "chat_id": chat_id,
-                                    "chat_name": chat_data.get("chat_name", "Untitled Chat"),
-                                    "last_message": last_message,
-                                    "message_count": len(messages),
-                                    "updated_at": chat_data.get("updated_at", ""),
-                                    "selected_files": chat_data.get("selected_files", [])
-                                })
-                        except Exception as e:
-                            logger.error(f"Error reading chat file {filename}: {str(e)}")
-                            
-            # Sort by updated_at (newest first)
-            all_chats.sort(key=lambda x: x.get("updated_at", "1970-01-01 00:00:00"), reverse=True)
-            return all_chats
-        
-        # Otherwise load specific chat history
-        chat_data = load_chat_history(chat_id)
-        if not chat_data:
-            raise HTTPException(status_code=404, detail=f"Chat {chat_id} not found")
-        
-        return chat_data
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error retrieving chat history: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve chat history: {str(e)}")
-
-@app.get("/files", summary="Get Available Files")
-async def get_files(tag: Optional[str] = None):
-    """Returns a list of available files in the vault, with optional tag filtering."""
-    try:
-        # Get all vault files from metadata
-        all_files = get_vault_files()
-        
-        # Filter by tag if provided
-        if tag:
-            tag = tag.lower().strip()
-            filtered_files = [
-                file for file in all_files 
-                if "tags" in file and tag in [t.lower() for t in file["tags"]]
-            ]
-            return {
-                "files": filtered_files,
-                "count": len(filtered_files),
-                "filtered_by_tag": tag
-            }
-        
-        # Return all files if no tag filter
-        return {
-            "files": all_files,
-            "count": len(all_files)
-        }
-    except Exception as e:
-        logger.error(f"Error retrieving files: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve files: {str(e)}")
-
-# Add main block to start the server when script is run directly
-if __name__ == "__main__":
-    # Initialize required directories
-    initialize_vault_directory()
-    initialize_chat_history_directory()
+# Modified function to ensure document grounding
+def verify_document_grounding(response_text: str, relevant_chunks: List[Dict]) -> Tuple[bool, float, str]:
+    """
+    Verifies that the response is grounded in the document content.
+    Returns a tuple of (is_grounded, grounding_score, modified_response)
+    """
+    if not relevant_chunks or not response_text:
+        return False, 0.0, response_text
     
-    # Check dependencies
-    dependency_status = check_dependencies()
+    # Combine all chunk content into a single document
+    document_content = " ".join([chunk["content"] for chunk in relevant_chunks])
     
-    # Get server configuration
-    host = SERVER_CONFIG.get("host", "0.0.0.0")
-    port = SERVER_CONFIG.get("port", 3000)
-    reload_enabled = SERVER_CONFIG.get("reload", False)
+    # Calculate grounding score based on n-gram overlap
+    # This is a simple implementation - more sophisticated methods could be used
+    response_words = set(response_text.lower().split())
+    document_words = set(document_content.lower().split())
     
-    print(f"\nStarting FastAPI server on http://{host}:{port}")
-    print("Press Ctrl+C to stop the server")
+    # Calculate word overlap
+    if not response_words:
+        return False, 0.0, response_text
+        
+    common_words = response_words.intersection(document_words)
+    grounding_score = len(common_words) / len(response_words)
     
-    # Start the server with uvicorn
-    uvicorn.run(
-        app,                # Pass app instance directly
-        host=host,          # Listen on all network interfaces by default
-        port=port,          # Use configured port
-        reload=reload_enabled  # Auto-reload during development if configured
-    )
+    # If grounding score is too low, add a disclaimer and include direct quotes
+    if grounding_score < 0.7:  # Threshold for acceptable grounding
+        # Find the most relevant chunk based on word overlap
+        best_chunk = max(relevant_chunks, key=lambda x: len(set(x["content"].lower().split()).intersection(response_words)))
+        
+        # Add a disclaimer and the relevant chunk as a direct quote
+        modified_response = (
+            f"{response_text}\n\n"
+            f"<div class='document-quote'><p><i>I've supplemented the answer with this direct content from the document:</i></p>"
+            f"<blockquote>{best_chunk['content']}</blockquote></div>"
+        )
+        
+        return False, grounding_score, modified_response
+    
+    return True, grounding_score, response_text

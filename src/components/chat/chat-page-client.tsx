@@ -4,7 +4,7 @@ import type { ChangeEvent } from 'react';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
-import { Paperclip, Send, FileText, Trash2, FolderOpen, XCircle } from "lucide-react";
+import { Paperclip, Send, FileText, Trash2, FolderOpen, XCircle, PlusCircle } from "lucide-react";
 import LoadingSpinner from "@/components/ui/loading-spinner";
 import type { ChatSession, ChatMessage as ImportedChatMessage } from "@/types";
 import { useToast } from "@/hooks/use-toast";
@@ -12,15 +12,19 @@ import { v4 as uuidv4 } from 'uuid';
 import { useConnectionStatus } from "@/hooks/use-connection-status";
 import { useApiService } from "@/hooks/use-api-service";
 import FileSelector from "./file-selector"; 
-import { Dialog, DialogContent, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogTitle, DialogFooter, DialogDescription, DialogHeader } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { VisuallyHidden } from "@/components/ui/visually-hidden";
 import { applySettingsToRequest } from "@/lib/settings";
+import { Alert } from "@/components/ui/alert";
+import { Tooltip } from "@/components/ui/tooltip";
 
 // Import settings functions
 import { loadUploadSettings, getChatRequestSettings } from "@/lib/settings-api";
 import { setGlobalApiService } from "@/lib/api-service-utils";
-// Remove unused import
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import MarkdownRenderer from './markdown-renderer';
 
 // Define ChatMessage interface
 interface ChatMessage {
@@ -32,39 +36,136 @@ interface ChatMessage {
   error?: boolean;
 }
 
-// Mock function for saving/loading chat history from localStorage
+// Updated localStorage keys for better organization
 const CHAT_HISTORY_KEY = "nebulaChatHistory";
+const CHAT_INDEX_KEY = "nebulaChatIndex";
+const CHAT_COUNTER_KEY = "nebulaChatCounter";
 
+// Enhanced localStorage functions for better persistence
 const saveChatSession = (session: ChatSession) => {
   try {
     if (typeof window === 'undefined') return;
-    const history = getLocalChatHistory();
-    const existingIndex = history.findIndex(s => s.id === session.id);
+    
+    // Ensure each message has a valid sender property before saving
+    const validatedMessages = session.messages.map(msg => ({
+      ...msg,
+      // Explicitly ensure sender is correctly set
+      sender: (msg.sender === "user" || msg.sender === "assistant") 
+        ? msg.sender 
+        : "assistant" // Default to assistant if sender is unexpected or missing
+    }));
+    
+    // Create the validated session with sender information guaranteed
+    const validatedSession = {
+      ...session,
+      messages: validatedMessages,
+      selectedFiles: session.selectedFiles || [] // Ensure selected files are saved
+    };
+    
+    // Save individual chat session by ID
+    localStorage.setItem(`${CHAT_HISTORY_KEY}_${validatedSession.id}`, 
+      JSON.stringify(validatedSession));
+    
+    // Update the chat index
+    const chatIndex = getChatIndex();
+    const existingIndex = chatIndex.findIndex(s => s.id === validatedSession.id);
+    
     if (existingIndex > -1) {
-      history[existingIndex] = session;
+      chatIndex[existingIndex] = {
+        id: validatedSession.id,
+        name: validatedSession.name,
+        lastModified: validatedSession.lastModified,
+        selectedFiles: validatedSession.selectedFiles || []
+      };
     } else {
-      history.unshift(session); // Add new sessions to the beginning
+      chatIndex.unshift({
+        id: validatedSession.id,
+        name: validatedSession.name,
+        lastModified: validatedSession.lastModified,
+        selectedFiles: validatedSession.selectedFiles || []
+      });
     }
-    localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(history));
+    
+    // Save updated index
+    localStorage.setItem(CHAT_INDEX_KEY, JSON.stringify(chatIndex));
+    console.log(`Saved chat session ${validatedSession.id} with ${validatedMessages.length} messages to local storage`);
   } catch (error) {
     console.error("Error saving chat session:", error);
   }
 };
 
-const getLocalChatHistory = (): ChatSession[] => {
+// Get chat index (list of all chats)
+const getChatIndex = (): Array<{id: string, name: string, lastModified: number, selectedFiles: string[]}> => {
   try {
     if (typeof window === 'undefined') return [];
-    const historyJson = localStorage.getItem(CHAT_HISTORY_KEY);
-    return historyJson ? JSON.parse(historyJson) : [];
+    const indexJson = localStorage.getItem(CHAT_INDEX_KEY);
+    return indexJson ? JSON.parse(indexJson) : [];
   } catch (error) {
-    console.error("Error loading chat history:", error);
+    console.error("Error loading chat index:", error);
     return [];
   }
 };
 
-// Generate a new chat ID
+// Load a specific chat session by ID
+const loadChatSession = (sessionId: string): ChatSession | null => {
+  try {
+    if (typeof window === 'undefined') return null;
+    const sessionJson = localStorage.getItem(`${CHAT_HISTORY_KEY}_${sessionId}`);
+    if (!sessionJson) return null;
+    
+    // Parse and validate the session
+    const session = JSON.parse(sessionJson);
+    
+    // Ensure messages have valid sender properties
+    if (session && session.messages) {
+      session.messages = session.messages.map((msg: any) => ({
+        ...msg,
+        sender: msg.sender === "user" ? "user" : "assistant" // Ensure valid sender
+      }));
+    }
+    
+    return session;
+  } catch (error) {
+    console.error(`Error loading chat session ${sessionId}:`, error);
+    return null;
+  }
+};
+
+// Get next chat number for naming
+const getNextChatNumber = (): number => {
+  try {
+    if (typeof window === 'undefined') return 1;
+    const counter = localStorage.getItem(CHAT_COUNTER_KEY);
+    const nextNumber = counter ? parseInt(counter) + 1 : 1;
+    localStorage.setItem(CHAT_COUNTER_KEY, nextNumber.toString());
+    return nextNumber;
+  } catch (error) {
+    console.error("Error getting next chat number:", error);
+    return 1;
+  }
+};
+
+// Generate a new chat ID with timestamp
 const generateNewChatId = () => {
   return `chat_${Math.random().toString(36).substring(2, 10)}_${Date.now()}`;
+};
+
+// Enhanced function to get local chat history
+const getLocalChatHistory = (): ChatSession[] => {
+  try {
+    if (typeof window === 'undefined') return [];
+    
+    // Get all chats from the index
+    const chatIndex = getChatIndex();
+    
+    // Load each chat by ID
+    return chatIndex
+      .map(chatInfo => loadChatSession(chatInfo.id))
+      .filter(session => session !== null) as ChatSession[];
+  } catch (error) {
+    console.error("Error loading chat history:", error);
+    return [];
+  }
 };
 
 export default function ChatPageClient({ 
@@ -92,6 +193,7 @@ export default function ChatPageClient({
   const [chatId, setChatId] = useState<string>(initialChatId || generateNewChatId());
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [isSummarizing, setIsSummarizing] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -100,9 +202,28 @@ export default function ChatPageClient({
   const [selectedFilesList, setSelectedFilesList] = useState<string[]>(selectedFiles);
   const [availableFiles, setAvailableFiles] = useState<any[]>([]);
   const [isLoadingFiles, setIsLoadingFiles] = useState(false);
+  // FIXED: Add missing chats state to store the list of available chats
+  const [chats, setChats] = useState<Array<{id: string, name: string, lastModified: number, selectedFiles: string[]}>>([]);
   const { toast } = useToast();
   
-  // Remove uploaded file (missing function)
+  // For automatic scrolling to bottom
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages]);
+  
+  // Debug logging for messages state
+  useEffect(() => {
+    if (messages.length > 0) {
+      console.log("Current messages state:", messages.map(m => ({
+        content: m.content.substring(0, 30) + "...",
+        sender: m.sender
+      })));
+    }
+  }, [messages]);
+  
+  // Remove uploaded file
   const removeUploadedFile = useCallback(() => {
     setUploadedFile(null);
     setDocumentSummary(null);
@@ -231,6 +352,7 @@ export default function ChatPageClient({
     return () => {
       isMounted = false;
       if (connectionCheckTimeout) {
+        // FIXED: Fixed the reference to connectionCheckTimeout
         clearTimeout(connectionCheckTimeout);
       }
       clearInterval(periodicCheck);
@@ -245,75 +367,6 @@ export default function ChatPageClient({
       setVisibleMessages(recentMessages.reverse());
     }
   }, [messages]);
-
-  // Fetch chat history from backend or localStorage
-  useEffect(() => {
-    const loadChatSessions = async () => {
-      // Ensure serviceApi and its methods are available
-      if (connectionStatus !== 'connected' || !serviceApi || typeof serviceApi.getChatHistory !== 'function') {
-        console.warn('loadChatSessions: API service not ready or not connected. Falling back to local.');
-        const localSessions = getLocalChatHistory();
-        if (localSessions.length > 0) {
-          setCurrentSession(localSessions[0]);
-        } else {
-          // await startNewSession(); // Call startNewSession if no local sessions
-        }
-        return;
-      }
-      
-      try {
-        // Pass a special value or use the chatId state to get all sessions
-        const sessions = await serviceApi.getChatHistory(chatId || 'all');
-        if (sessions && sessions.length > 0) {
-          setCurrentSession(sessions[0]); // Load the most recent session
-        } else {
-          // await startNewSession(); // No sessions on backend, start a new one
-        }
-      } catch (error) {
-        console.error("Error loading chat sessions from backend:", error);
-        const localSessions = getLocalChatHistory();
-        if (localSessions.length > 0) {
-          setCurrentSession(localSessions[0]);
-        } else {
-          // await startNewSession(); // Fallback to new session if backend and local fail
-        }
-      }
-    };
-
-    if (!currentSession) { // Only load if no session is currently active
-      loadChatSessions();
-    }
-  }, [connectionStatus, serviceApi, currentSession]); // Added currentSession to dependencies
-
-  // Start a new session or load latest one
-  useEffect(() => {
-    const history = getLocalChatHistory();
-    if (history.length > 0 && !currentSession) {
-      // setCurrentSession(history[0]); // Load latest local if no current session
-      // startNewSession(); // This might be redundant given the load logic
-    } else if (!currentSession) {
-      // startNewSession();
-    }
-  }, []); 
-
-  // Load messages from current session
-  useEffect(() => {
-    if (currentSession) {
-      const mappedMessages = currentSession.messages.map(msg => ({
-        ...msg,
-        // Ensure sender is correctly typed
-        sender: (msg.sender === "user" || msg.sender === "assistant") 
-          ? msg.sender as "user" | "assistant" 
-          : "assistant" // Default to assistant if sender is unexpected
-      }));
-      setMessages(mappedMessages);
-      
-      // Load document summary if available
-      if (currentSession.documentContext) {
-        setDocumentSummary(currentSession.documentContext.summary || null);
-      }
-    }
-  }, [currentSession]);
 
   // Load available files from backend
   useEffect(() => {
@@ -412,20 +465,46 @@ export default function ChatPageClient({
     return null;
   };
 
+  // Create a new chat
+  const createNewChat = useCallback(() => {
+    // Generate next chat number for naming
+    const chatNumber = getNextChatNumber();
+    const newChatId = generateNewChatId();
+    
+    // Create new session
+    const newSession: ChatSession = {
+      id: newChatId,
+      name: `Chat ${chatNumber}`,
+      messages: [],
+      selectedFiles: [],
+      lastModified: Date.now()
+    };
+    
+    // Save to storage
+    saveChatSession(newSession);
+    
+    // Update state
+    setCurrentSession(newSession);
+    setMessages([]);
+    setChatId(newChatId);
+    setSelectedFilesList([]);
+    
+    // Update chats list
+    setChats(prevChats => [{
+      id: newChatId,
+      name: newSession.name,
+      lastModified: newSession.lastModified,
+      selectedFiles: []
+    }, ...prevChats]);
+    
+    return newSession;
+  }, []);
+
   // Start a new chat session
   const startNewSession = useCallback(async () => {
     if (!serviceApi || connectionStatus !== 'connected') {
       console.log("Starting offline session");
-      // Create local session without contacting backend
-      const newSession = {
-        id: uuidv4(),
-        name: "New Chat",
-        messages: [],
-        lastModified: Date.now()
-      };
-      setCurrentSession(newSession);
-      setChatId(newSession.id);
-      return newSession;
+      return createNewChat();
     }
 
     try {
@@ -435,25 +514,33 @@ export default function ChatPageClient({
       // Call backend to create a session
       const response = await serviceApi.createChatSession();
       
+      // Generate next chat number for naming
+      const chatNumber = getNextChatNumber();
+      
       // Create new session object
       const newSession = {
         id: response.chat_id,
-        name: response.chat_name || "New Chat",
+        name: `Chat ${chatNumber}`,
         messages: [],
+        selectedFiles: [],
         lastModified: Date.now()
       };
       
       // Set current session state
       setCurrentSession(newSession);
       setChatId(newSession.id);
+      setMessages([]);
       
-      // Update selected files if needed
-      if (selectedFilesList.length > 0) {
-        await serviceApi.updateFileSelection({
-          sessionId: newSession.id,
-          files: selectedFilesList
-        });
-      }
+      // Save to local storage
+      saveChatSession(newSession);
+      
+      // Update chats list
+      setChats(prevChats => [{
+        id: newSession.id,
+        name: newSession.name,
+        lastModified: newSession.lastModified,
+        selectedFiles: []
+      }, ...prevChats]);
       
       console.log("New session created:", newSession);
       return newSession;
@@ -466,60 +553,90 @@ export default function ChatPageClient({
       });
       
       // Fall back to local session
-      const fallbackSession = {
-        id: uuidv4(),
-        name: "New Chat (Offline)",
-        messages: [],
-        lastModified: Date.now()
-      };
-      setCurrentSession(fallbackSession);
-      setChatId(fallbackSession.id);
-      return fallbackSession;
+      return createNewChat();
     } finally {
       setIsLoading(false);
     }
-  }, [connectionStatus, serviceApi, selectedFilesList, toast]);
+  }, [connectionStatus, serviceApi, toast, createNewChat]);
 
-  // Load existing chat history
+  // Load a specific chat
+  const loadChat = useCallback((chatId: string) => {
+    const session = loadChatSession(chatId);
+    if (session) {
+      setCurrentSession(session);
+      setMessages(session.messages || []);
+      setChatId(session.id);
+      setSelectedFilesList(session.selectedFiles || []);
+    }
+  }, []);
+
+  // Load chat list on component mount
+  useEffect(() => {
+    const chatIndex = getChatIndex();
+    setChats(chatIndex);
+    
+    // If the chat list is empty, create a new chat
+    if (chatIndex.length === 0 && !initialChatId) {
+      createNewChat();
+    }
+  }, [createNewChat, initialChatId]);
+
+  // Load existing chat history from backend or localStorage
   const loadChatHistory = useCallback(async (id: string) => {
     try {
       setIsLoading(true);
       
-      if (!serviceApi || connectionStatus !== 'connected') {
-        throw new Error("API service not available");
+      // First try to load from local storage
+      const localSession = loadChatSession(id);
+      if (localSession) {
+        setCurrentSession(localSession);
+        setMessages(localSession.messages || []);
+        setChatId(localSession.id);
+        setSelectedFilesList(localSession.selectedFiles || []);
+        return localSession;
       }
       
-      console.log("Loading chat history from backend:", id);
-      const history = await serviceApi.getChatHistory(id);
-      
-      if (!history) {
-        throw new Error("No history found");
+      // If not found locally and API is available, try loading from backend
+      if (serviceApi && connectionStatus === 'connected') {
+        console.log("Loading chat history from backend:", id);
+        const history = await serviceApi.getChatHistory(id);
+        
+        if (history) {
+          // Convert backend format to frontend format
+          const session = {
+            id: history.chat_id,
+            name: history.chat_name || "Chat",
+            messages: (history.messages || []).map((msg: any) => ({
+              id: msg.id || uuidv4(),
+              sender: msg.role === "user" ? "user" : "assistant",
+              content: msg.content,
+              timestamp: new Date(msg.timestamp).getTime() || Date.now()
+            })),
+            selectedFiles: history.selected_files || [],
+            lastModified: new Date(history.updated_at).getTime() || Date.now()
+          };
+          
+          // Update state
+          setCurrentSession(session);
+          setMessages(session.messages || []);
+          setChatId(session.id);
+          setSelectedFilesList(session.selectedFiles || []);
+          
+          // Save to local storage for future use
+          saveChatSession(session);
+          
+          return session;
+        }
       }
       
-      // Convert backend format to frontend format
-      const session = {
-        id: history.chat_id,
-        name: history.chat_name || "Chat",
-        messages: (history.messages || []).map((msg: any) => ({
-          id: msg.id || uuidv4(),
-          sender: msg.role === "user" ? "user" : "assistant",
-          content: msg.content,
-          timestamp: new Date(msg.timestamp).getTime() || Date.now()
-        })),
-        lastModified: new Date(history.updated_at).getTime() || Date.now()
-      };
+      // If we reach here, no chat found - create a new one
+      toast({
+        title: "Chat not found",
+        description: "Creating a new chat session",
+        variant: "default"
+      });
       
-      // Update state
-      setCurrentSession(session);
-      setMessages(session.messages || []);
-      setChatId(session.id);
-      
-      // Update selected files if provided
-      if (history.selected_files && Array.isArray(history.selected_files)) {
-        setSelectedFilesList(history.selected_files);
-      }
-      
-      return session;
+      return startNewSession();
     } catch (error) {
       console.error("Error loading chat history:", error);
       toast({ 
@@ -527,28 +644,48 @@ export default function ChatPageClient({
         description: "Failed to load chat history", 
         variant: "destructive" 
       });
-      await startNewSession();
-      return null;
+      return startNewSession();
     } finally {
       setIsLoading(false);
     }
   }, [connectionStatus, serviceApi, startNewSession, toast]);
 
-
-  // Effect for initializing chat: runs when initialChatId, loadChatHistory, or startNewSession changes.
+  // Effect for initializing chat
   useEffect(() => {
     const initChat = async () => {
+      // If an initial chat ID was provided, try to load it
       if (initialChatId) {
         await loadChatHistory(initialChatId);
-      } else if (!currentSession) {
-        await startNewSession();
+      } 
+      // If we have a current chatId but no session, try to load that chat
+      else if (chatId && !currentSession) {
+        const localSession = loadChatSession(chatId);
+        if (localSession) {
+          setCurrentSession(localSession);
+          setMessages(localSession.messages || []);
+        } else {
+          // No local session found - load from chat index or create new
+          const chatIndex = getChatIndex();
+          if (chatIndex.length > 0) {
+            loadChat(chatIndex[0].id);
+          } else {
+            await startNewSession();
+          }
+        }
+      } 
+      // If no current session and no specific chat to load, create new or load latest
+      else if (!currentSession) {
+        const chatIndex = getChatIndex();
+        if (chatIndex.length > 0) {
+          loadChat(chatIndex[0].id);
+        } else {
+          await startNewSession();
+        }
       }
     };
     
-    if (connectionStatus === 'connected') {
-      initChat();
-    }
-  }, [connectionStatus, initialChatId, currentSession, loadChatHistory, startNewSession]);
+    initChat();
+  }, [chatId, currentSession, initialChatId, loadChat, loadChatHistory, startNewSession]);
 
   // Handle file selection change
   const handleFileSelectionChange = useCallback(async (files: string[]) => {
@@ -566,7 +703,32 @@ export default function ChatPageClient({
         console.error("Error updating file selection on backend:", error);
       }
     }
-  }, [chatId, connectionStatus, serviceApi]);
+    
+    // Always update local storage with selected files for current chat
+    if (currentSession) {
+      const updatedSession = {
+        ...currentSession,
+        selectedFiles: files,
+        lastModified: Date.now()
+      };
+      saveChatSession(updatedSession);
+      setCurrentSession(updatedSession);
+      
+      // Update chat list
+      setChats(prevChats => {
+        const updatedChats = [...prevChats];
+        const chatIndex = updatedChats.findIndex(c => c.id === chatId);
+        if (chatIndex > -1) {
+          updatedChats[chatIndex] = {
+            ...updatedChats[chatIndex],
+            selectedFiles: files,
+            lastModified: Date.now()
+          };
+        }
+        return updatedChats;
+      });
+    }
+  }, [chatId, connectionStatus, serviceApi, currentSession]);
 
   // Open file selector dialog
   const openFileSelector = useCallback(() => {
@@ -577,7 +739,189 @@ export default function ChatPageClient({
     setIsFileDialogOpen(true);
   }, [connectionStatus, toast]);
 
-  // Send message to chat
+  // Trigger file input click
+  const triggerFileDialog = useCallback(() => {
+    if (fileInputRef.current) {
+      fileInputRef.current.click();
+    }
+  }, [fileInputRef]);
+
+  // Make sure we never use local IP in uploads
+  const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://13.202.208.115:3000';
+
+  // Handle file change
+  const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    
+    setUploadedFile(file);
+    setIsSummarizing(true);
+    setDocumentSummary(null);
+    setUploadProgress(0);
+    setFileProcessingStep("Uploading file...");
+
+    if (!serviceApi || typeof serviceApi.uploadFile !== 'function') {
+        toast({ title: "API Error", description: "File upload service not available.", variant: "destructive" });
+        setIsSummarizing(false);
+        setUploadedFile(null);
+        return;
+    }
+
+    try {
+      if (connectionStatus !== 'connected') throw new Error("Backend connection required for file upload.");
+
+      const uploadResponse = await serviceApi.uploadFile(file, (progress: number) => setUploadProgress(progress));
+      
+      setFileProcessingStep("Processing document...");
+      
+      const backendFilename = uploadResponse.fileId; 
+      const newSelectedFiles = [...selectedFilesList, backendFilename];
+      setSelectedFilesList(newSelectedFiles);
+      
+      setFileProcessingStep("Ready for questions!");
+      toast({ title: "File Uploaded", description: `${file.name} ready.`, variant: "default" });
+      setDocumentSummary(`File ${file.name} uploaded and selected for context.`);
+      
+      if (currentSession) {
+        const updatedSession = { ...currentSession, selectedFiles: newSelectedFiles, lastModified: Date.now() };
+        setCurrentSession(updatedSession);
+        saveChatSession(updatedSession);
+      }
+    } catch (error) {
+      console.error("Error processing document:", error);
+      toast({ title: "Processing Error", description: connectionStatus === 'connected' ? `Could not process ${file.name}.` : "Backend connection required.", variant: "destructive" });
+      setDocumentSummary("Failed to process document.");
+      setFileProcessingStep("Error during processing");
+      setUploadedFile(null);
+    } finally {
+      setIsSummarizing(false);
+    }
+  };
+
+  // Send message
+  const sendMessage = async (messageText: string) => {
+    try {
+      const newMessage: ChatMessage = {
+        id: uuidv4(),
+        sender: "user",
+        content: messageText,
+        timestamp: Date.now()
+      };
+      
+      setMessages((prevMessages: ChatMessage[]) => [...prevMessages, newMessage]);
+      
+      console.log("Sending message to backend with parameters:", {
+        message: messageText,
+        selected_files: selectedFilesList,
+        sessionId: chatId
+      });
+      
+      const response = await serviceApi.sendChatMessage({
+        message: messageText,
+        selected_files: selectedFilesList,
+        sessionId: chatId
+      });
+      
+      console.log("Response from backend:", response);
+      
+      if (response && response.message) {
+        const assistantMessage: ChatMessage = {
+          id: uuidv4(),
+          sender: "assistant",
+          content: response.message,
+          timestamp: Date.now()
+        };
+        
+        setMessages((prevMessages: ChatMessage[]) => {
+          const updatedMessages = [...prevMessages, assistantMessage];
+          
+          if (currentSession) {
+            const updatedSession = {
+              ...currentSession,
+              messages: updatedMessages,
+              selectedFiles: selectedFilesList,
+              lastModified: Date.now()
+            };
+            
+            saveChatSession(updatedSession);
+            setCurrentSession(updatedSession);
+            
+            setChats(prevChats => {
+              const updatedChats = [...prevChats];
+              const chatIndex = updatedChats.findIndex(c => c.id === chatId);
+              if (chatIndex > -1) {
+                updatedChats[chatIndex] = {
+                  ...updatedChats[chatIndex],
+                  lastModified: Date.now()
+                };
+              }
+              return updatedChats;
+            });
+          }
+          
+          return updatedMessages;
+        });
+        
+        if (response.chat_name && currentSession) {
+          setCurrentSession(prev => prev ? {
+            ...prev,
+            name: response.chat_name || prev.name
+          } : null);
+          
+          // Update chat name in the list
+          setChats(prevChats => {
+            const updatedChats = [...prevChats];
+            const chatIndex = updatedChats.findIndex(c => c.id === chatId);
+            if (chatIndex > -1) {
+              updatedChats[chatIndex] = {
+                ...updatedChats[chatIndex],
+                name: response.chat_name
+              };
+            }
+            return updatedChats;
+          });
+        }
+
+        if (response.client_id && response.client_id !== chatId) {
+          console.log(`Syncing local chat ID ${chatId} to backend ID ${response.client_id}`);
+          
+          if (currentSession) {
+            const newSession = {
+              ...currentSession,
+              id: response.client_id,
+              messages: [...messages, assistantMessage],
+              lastModified: Date.now()
+            };
+            
+            saveChatSession(newSession);
+            setCurrentSession(newSession);
+            setChatId(response.client_id);
+            
+            // Update chat ID in the list
+            setChats(prevChats => {
+              const updatedChats = prevChats.filter(c => c.id !== chatId);
+              updatedChats.unshift({
+                id: response.client_id,
+                name: newSession.name,
+                lastModified: newSession.lastModified,
+                selectedFiles: newSession.selectedFiles || []
+              });
+              return updatedChats;
+            });
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Error in message handling:", error);
+      toast({
+        title: "Error",
+        description: "Failed to send message. Please try again.",
+        variant: "destructive"
+      });
+    }
+  };
+
+  // Handle send message
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
     
@@ -585,426 +929,272 @@ export default function ChatPageClient({
     
     try {
       setIsWaitingForResponse(true);
-      
-      // Create user message
-      const userMessage: ChatMessage = {
-        id: uuidv4(),
-        sender: "user",
-        content: input,
-        timestamp: Date.now()
-      };
-      
-      // Add to current messages
-      setMessages(prevMessages => [...prevMessages, userMessage]);
-      
-      // Remember input then clear it
-      const sentInput = input;
+      await sendMessage(input);
       setInput("");
-      
-      // Check if serviceApi is available and has the required methods
-      const hasSendChatMessage = serviceApi && typeof serviceApi.sendChatMessage === 'function';
-      
-      if (!serviceApi || !hasSendChatMessage || connectionStatus !== 'connected') {
-        console.error("Cannot send message:", 
-          !serviceApi ? "API service not available" : 
-          !hasSendChatMessage ? "sendChatMessage method missing" : 
-          "Not connected to backend");
-        
-        showOfflineMessage();
-        return;
-      }
-      
-      // Only execute this if connected and sendChatMessage is available
-      try {
-        console.log("Sending message to backend with parameters:", {
-          message: sentInput,
-          selected_files: selectedFilesList,
-          sessionId: chatId
-        });
-        
-        const response = await serviceApi.sendChatMessage({
-          message: sentInput,
-          selected_files: selectedFilesList,
-          sessionId: chatId
-        });
-        
-        console.log("Response from backend:", response);
-        handleChatResponse(response);
-      } catch (error) {
-        handleChatError(error);
-      }
-      
-      // Scroll to bottom after message is added
-      setTimeout(() => {
-        if (messagesContainerRef.current) {
-          messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
-        }
-      }, 100);
     } catch (error) {
-      console.error("Error in message handling:", error);
+      console.error("Error sending message:", error);
+      toast({
+        title: "Error",
+        description: "Failed to send message",
+        variant: "destructive"
+      });
     } finally {
       setIsWaitingForResponse(false);
     }
-    
-    // Helper function to show offline message
-    function showOfflineMessage() {
-      setTimeout(() => {
-        const offlineMessage: ChatMessage = {
-          id: uuidv4(),
-          sender: "assistant",
-          content: "I'm currently offline. Your message has been saved and will be processed when connection is restored.",
-          timestamp: Date.now(),
-          error: true
-        };
+  };
+
+  // Verify and repair local storage
+  const verifyAndRepairLocalStorage = useCallback(() => {
+    // Check all localStorage items and fix any messages with incorrect sender property
+    try {
+      if (typeof window === 'undefined') return;
+      
+      const history = getLocalChatHistory();
+      let needsUpdate = false;
+      
+      for (let i = 0; i < history.length; i++) {
+        const session = history[i];
+        let sessionNeedsUpdate = false;
         
-        setMessages(prevMessages => [...prevMessages, offlineMessage]);
-        setIsWaitingForResponse(false);
-      }, 500); // Short delay for better UX
-    }
-    
-    // Helper function to handle chat response
-    function handleChatResponse(response: any) {
-      if (response) {
-        if (response.all_messages && Array.isArray(response.all_messages)) {
-          // Map backend messages to our format
-          interface BackendMessage {
-            id?: string;
-            role: "user" | "assistant" | string;
-            content: string;
-            timestamp: string | number | Date;
-          }
-
-          const mappedMessages: ChatMessage[] = response.all_messages.map((msg: BackendMessage): ChatMessage => ({
-            id: msg.id || uuidv4(),
-            sender: msg.role === "user" ? "user" : "assistant",
-            content: msg.content,
-            timestamp: new Date(msg.timestamp).getTime() || Date.now()
-          }));
-          
-          setMessages(mappedMessages);
-        } 
-        else if (response.message) {
-          const aiMessage: ChatMessage = {
-            id: uuidv4(),
-            sender: "assistant",
-            content: response.message,
-            timestamp: Date.now()
-          };
-          
-          setMessages(prevMessages => [...prevMessages, aiMessage]);
-        }
-        
-        // Update chat name if provided
-        if (response.chat_name && currentSession) {
-          setCurrentSession((prev: ChatSession | null) => prev ? {
-            ...prev,
-            name: response.chat_name || prev.name
-          } : null);
-        }
-      }
-    }
-    
-    // Helper function to handle chat errors
-    function handleChatError(error: any) {
-      console.error("Error sending message:", error);
-      
-      // Check if it's a connection error
-      const isConnectionError = error instanceof Error && 
-        (error.message.includes('network') || 
-         error.message.includes('connection') ||
-         error.message.includes('ECONNREFUSED') ||
-         error.message.includes('timeout'));
-      
-      if (isConnectionError) {
-        setConnectionStatus('disconnected');
-      }
-      
-      // Add error message to chat
-      const errorMessage: ChatMessage = {
-        id: uuidv4(),
-        sender: "assistant",
-        content: isConnectionError
-          ? "I can't reach the backend server right now. Please check your connection."
-          : "Sorry, there was an error processing your message. Please try again.",
-        timestamp: Date.now(),
-        error: true
-      };
-      
-      setMessages(prevMessages => [...prevMessages, errorMessage]);
-      
-      toast({
-        title: "Error",
-        description: isConnectionError 
-          ? "Connection to backend failed"
-          : "Failed to send message",
-        variant: "destructive"
-      });
-    }
-  };
-
-  // Process uploaded file
-  const processUploadedFile = useCallback(async (file: File) => {
-    if (!serviceApi || typeof serviceApi.uploadFile !== 'function' || typeof serviceApi.processDocument !== 'function') {
-        toast({ title: "API Error", description: "File processing service not available.", variant: "destructive" });
-        return;
-    }
-    try {
-      setIsSummarizing(true);
-      setUploadProgress(0);
-      setFileProcessingStep("Uploading file...");
-      
-      // Upload the file
-      const response = await serviceApi.uploadFile(file, (progress) => setUploadProgress(progress));
-      
-      // Process the document using returned fileId
-      setFileProcessingStep("Processing document...");
-      const result = await serviceApi.processDocument({ fileId: response.fileId, fileName: response.fileName }); // Use correct property
-      
-      setDocumentSummary(result.summary || "Document processed."); // Display summary
-      
-      // Auto-select file if setting is enabled
-      const uploadSettings = loadUploadSettings();
-      if (uploadSettings.autoAddToChat) {
-        handleFileSelectionChange([...selectedFilesList, response.fileName]); // Use fileName from response
-      }
-      
-      toast({ title: "File processed", description: "File ready to use." });
-    } catch (error) {
-      console.error("Error processing file:", error);
-      toast({ title: "Processing failed", description: error instanceof Error ? error.message : "Failed to process file.", variant: "destructive" });
-    } finally {
-      setIsSummarizing(false);
-      setUploadProgress(100); // Ensure progress shows complete
-    }
-  }, [serviceApi, handleFileSelectionChange, selectedFilesList, toast]);
-
-  // Handle file upload
-  const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    
-    setUploadedFile(file); // Store the selected file
-    setIsSummarizing(true); // Start processing indicator
-    setDocumentSummary(null); // Clear previous summary
-    setUploadProgress(0); // Reset progress
-    setFileProcessingStep("Uploading file..."); // Set initial step
-
-    // Ensure API service is available
-    if (!serviceApi || typeof serviceApi.uploadFile !== 'function') {
-        toast({ title: "API Error", description: "File upload service not available.", variant: "destructive" });
-        setIsSummarizing(false);
-        setUploadedFile(null); // Clear file if service fails
-        return;
-    }
-
-    try {
-      // Check for backend connection
-      if (connectionStatus !== 'connected') throw new Error("Backend connection required for file upload.");
-
-      // Upload file and get backend-generated filename/ID
-      const uploadResponse = await serviceApi.uploadFile(file, (progress: number) => setUploadProgress(progress));
-      
-      // Update UI to reflect processing state
-      setFileProcessingStep("Processing document...");
-      
-      // Use the fileId from the upload response
-      const backendFilename = uploadResponse.fileId; 
-      const newSelectedFiles = [...selectedFilesList, backendFilename];
-      setSelectedFilesList(newSelectedFiles); // Auto-select the uploaded file
-      
-      // Update processing step and notify user
-      setFileProcessingStep("Ready for questions!");
-      toast({ title: "File Uploaded", description: `${file.name} ready.`, variant: "default" });
-      setDocumentSummary(`File ${file.name} uploaded and selected for context.`);
-      
-      // Update current session with the newly selected file
-      if (currentSession) {
-        const updatedSession = { ...currentSession, selectedFiles: newSelectedFiles, lastModified: Date.now() };
-        setCurrentSession(updatedSession);
-        saveChatSession(updatedSession); // Save session locally
-      }
-    } catch (error) {
-      console.error("Error processing document:", error);
-      toast({ title: "Processing Error", description: connectionStatus === 'connected' ? `Could not process ${file.name}.` : "Backend connection required.", variant: "destructive" });
-      setDocumentSummary("Failed to process document."); // Show error in summary area
-      setFileProcessingStep("Error during processing"); // Update step
-      setUploadedFile(null); // Clear uploaded file on error
-    } finally {
-      setIsSummarizing(false); // End processing indicator
-    }
-  };
-
-  // Check connection function that can be passed to the ConnectionStatus component
-  const checkConnection = useCallback(async () => {
-    if (!serviceApi) return;
-    
-    setConnectionStatus('connecting');
-    try {
-      if (typeof serviceApi.checkStatus === 'function') {
-        await serviceApi.checkStatus();
-        setConnectionStatus('connected');
-      } else if (typeof serviceApi.getFiles === 'function') {
-        await serviceApi.getFiles();
-        setConnectionStatus('connected');
-      } else {
-        throw new Error("No suitable API method found");
-      }
-    } catch (error) {
-      console.error("Connection check failed:", error);
-      setConnectionStatus('disconnected');
-    }
-  }, [serviceApi]);
-
-  const triggerFileDialog = () => {
-    fileInputRef.current?.click();
-  };
-  
-  // Connection status component to display the current connection state
-  function ConnectionStatus({ 
-    status, 
-    onReconnect 
-  }: { 
-    status: 'connected' | 'connecting' | 'disconnected',
-    onReconnect?: () => void
-  }) {
-    return (
-      <div 
-        className={`flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${
-          status === 'connected' 
-            ? 'bg-green-500/20 text-green-600' 
-            : status === 'connecting'
-            ? 'bg-yellow-500/20 text-yellow-600'
-            : 'bg-destructive/20 text-destructive cursor-pointer'
-        }`}
-        onClick={status === 'disconnected' && onReconnect ? onReconnect : undefined}
-      >
-        <div className={`w-1.5 h-1.5 rounded-full ${
-          status === 'connected' 
-            ? 'bg-green-500' 
-            : status === 'connecting'
-            ? 'bg-yellow-500'
-            : 'bg-destructive'
-        }`} />
-        <span>
-          {status === 'connected' 
-            ? 'Connected' 
-            : status === 'connecting' 
-            ? 'Connecting...' 
-            : 'Disconnected'}
-        </span>
-          </div>
-        );
-      }
-  }
-
-  // Message list component to display chat messages
-  function MessageList({
-    messages,
-    isWaitingForResponse,
-    containerRef
-  }: {
-    messages: ChatMessage[],
-    isWaitingForResponse: boolean,
-    containerRef: React.RefObject<HTMLDivElement>
-  }) {
-    // Pass the ref through props instead of accessing parent scope
-    
-    return (
-      <div className="flex-1 overflow-y-auto p-2" ref={containerRef}>
-        <div className="flex flex-col justify-end min-h-full">
-          <div className="space-y-2">
-            {messages.map((msg) => (
-              <div
-                key={msg.id}
-                className={`flex ${
-                  msg.sender === "user" ? "justify-end" : "justify-start"
-                }`}
-              >
-                <div
-                  className={`max-w-[80%] p-2 rounded-lg shadow-sm text-xs ${
-                    msg.sender === "user"
-                      ? "bg-primary text-primary-foreground rounded-br-none"
-                      : msg.error
-                      ? "bg-destructive/20 text-destructive-foreground rounded-bl-none border border-destructive/30"
-                      : "bg-secondary text-secondary-foreground rounded-bl-none glassmorphic"
-                  }`}
-                >
-                  <p className="whitespace-pre-wrap break-words">{msg.content}</p>
-                  {msg.citations && msg.citations.length > 0 && (
-                    <div className="mt-1 border-t border-primary-foreground/20 pt-1">
-                      <p className="text-[10px] font-semibold">Citations:</p>
-                      <ul className="list-disc list-inside text-[10px]">
-                        {msg.citations.slice(0, 1).map((cite, i) => <li key={i} className="truncate">{cite}</li>)}
-                        {msg.citations.length > 1 && <li className="truncate">+{msg.citations.length - 1} more</li>}
-                      </ul>
-                    </div>
-                  )}
-                  <p className={`text-[8px] ${msg.sender === 'user' ? 'text-primary-foreground/70 text-right' : 'text-muted-foreground/70 text-left'}`}>
-                    {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </p>
-                </div>
-              </div>
-            ))}
+        if (Array.isArray(session.messages)) {
+          for (let j = 0; j < session.messages.length; j++) {
+            const msg = session.messages[j];
             
-            {isWaitingForResponse && (
-              <div className="flex justify-start">
-                <div className="max-w-[80%] p-2 rounded-lg shadow-sm bg-secondary text-secondary-foreground rounded-bl-none glassmorphic">
-                  <LoadingSpinner size="sm" />
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // Chat input component for entering messages and uploading files
-  function ChatInput({
-    input,
-    setInput,
-    onSendMessage,
-    onUploadFile,
-    isWaitingForResponse,
-    isSummarizing,
-    uploadedFile,
-    connectionStatus
-  }: {
-    input: string,
-    setInput: (value: string) => void,
-    onSendMessage: (e: FormEvent) => void,
-    onUploadFile: () => void,
-    isWaitingForResponse: boolean,
-    isSummarizing: boolean,
-    uploadedFile: File | null,
-    connectionStatus: 'connected' | 'disconnected' | 'connecting'
-  }) {
-    // Create a ref for the input element
-    const inputRef = useRef<HTMLInputElement>(null);
-    
-    // Focus the input element on mount and when waiting state changes
-    useEffect(() => {
-      if (!isWaitingForResponse && !isSummarizing && inputRef.current) {
-        inputRef.current.focus();
+            // Fix sender if needed
+            if (msg.sender !== "user" && msg.sender !== "assistant") {
+              console.warn(`Repairing message in session ${session.id} with invalid sender: ${msg.sender}`);
+              session.messages[j] = {
+                ...msg,
+                sender: msg.content.includes("<") ? "assistant" : "user"
+              };
+              sessionNeedsUpdate = true;
+            }
+          }
+        }
+        
+        if (sessionNeedsUpdate) {
+          history[i] = session;
+          needsUpdate = true;
+        }
       }
-    }, [isWaitingForResponse, isSummarizing]);
-    
-    // Handle click on the input to ensure it's focused
-    const handleInputClick = () => {
-      if (inputRef.current) {
-        inputRef.current.focus();
+      
+      if (needsUpdate) {
+        // Update each session individually
+        history.forEach(session => {
+          saveChatSession(session);
+        });
+        console.log("Repaired localStorage chat history with corrected sender properties");
+      }
+    } catch (error) {
+      console.error("Error repairing localStorage:", error);
+    }
+  }, []);
+
+  // Run repair on component mount
+  useEffect(() => {
+    verifyAndRepairLocalStorage();
+  }, [verifyAndRepairLocalStorage]);
+
+  // Add event listeners for sidebar chat selection
+  useEffect(() => {
+    // Function to handle chat selection from sidebar
+    const handleChatSelected = (event: Event) => {
+      const customEvent = event as CustomEvent;
+      if (customEvent.detail && customEvent.detail.chatId) {
+        const newChatId = customEvent.detail.chatId;
+        
+        // Load the selected chat
+        const chatData = localStorage.getItem(`${CHAT_HISTORY_KEY}_${newChatId}`);
+        if (chatData) {
+          const parsedChat = JSON.parse(chatData);
+          setCurrentSession(parsedChat);
+          setMessages(parsedChat.messages || []);
+          setChatId(newChatId);
+          setSelectedFilesList(parsedChat.selectedFiles || []);
+        }
       }
     };
     
-    return (
-      <CardFooter className="p-2 border-t border-border/50 shrink-0">
-        <form onSubmit={onSendMessage} className="flex w-full items-center gap-1">
+    // Listen for chat selection and creation events from sidebar
+    window.addEventListener('chatSelected', handleChatSelected);
+    window.addEventListener('chatCreated', handleChatSelected);
+    
+    return () => {
+      window.removeEventListener('chatSelected', handleChatSelected);
+      window.removeEventListener('chatCreated', handleChatSelected);
+    };
+  }, []);
+
+  // Add a function to refresh available files
+  const refreshAvailableFiles = useCallback(async () => {
+    setIsLoadingFiles(true);
+    try {
+      const response = await serviceApi.getFiles();
+      // Handle both array responses and responses with a files property
+      const files = Array.isArray(response) ? response : response?.files || [];
+      setAvailableFiles(files);
+    } catch (error) {
+      console.error("Error fetching available files:", error);
+      toast({
+        title: "Error",
+        description: "Failed to load available files.",
+        variant: "destructive"
+      });
+    } finally {
+      setIsLoadingFiles(false);
+    }
+  }, [serviceApi, toast]);
+
+  // Helper function to detect message format
+  const detectMessageFormat = (content: string): 'markdown' | 'html' => {
+    // Check for HTML tags
+    if (/<\/?[a-z][\s\S]*>/i.test(content)) {
+      return 'html';
+    }
+    
+    // Check for common Markdown patterns
+    const markdownPatterns = [
+      /\*\*(.+?)\*\*/,                // Bold
+      /\*(.+?)\*/,                    // Italic
+      /^#+\s+.+$/m,                   // Headings
+      /^\s*[\-\*\+]\s+.+/m,           // Unordered list
+      /^\s*\d+\.\s+.+/m,              // Ordered list
+      /\[.+?\]\(.+?\)/,               // Links
+      /```[\s\S]+?```/m,              // Code fences
+      /`.+?`/                        // Inline code
+    ];
+    
+    // If any Markdown pattern matches, treat as Markdown
+    for (const pattern of markdownPatterns) {
+      if (pattern.test(content)) {
+        return 'markdown';
+      }
+    }
+    
+    // Default to HTML if no patterns matched
+    return 'html';
+  };
+
+  // Function to control file selector dialog visibility
+  const setShowFileSelector = useCallback((show: boolean) => {
+    if (show) {
+      // Reuse existing openFileSelector function which has connection validation
+      openFileSelector();
+    } else {
+      setIsFileDialogOpen(false);
+    }
+  }, [openFileSelector, setIsFileDialogOpen]);
+
+  // Render the chat interface 
+  return (
+    <div className="flex flex-col min-h-[98vh] max-h-[98vh] w-full max-w-full overflow-hidden  text-white">
+      {/* Chat header - simplified without dropdown */}
+      <div className="flex items-center justify-between p-2 border border-gray-800 bg-black">
+        <div className="flex items-center gap-2">
+          {/* Display current chat name instead of dropdown */}
+          <h2 className="text-sm font-medium text-white truncate">
+            {currentSession?.name || "Chat"}
+          </h2>
+        </div>
+        
+        <div className="flex items-center gap-2">
+          {/* Connection status indicator */}
+          <div 
+            className={`h-3 w-3 rounded-full ${
+              connectionStatus === 'connected' 
+                ? 'bg-green-500' 
+                : connectionStatus === 'connecting' 
+                  ? 'bg-yellow-500 animate-pulse' 
+                  : 'bg-red-500'
+            }`}
+            title={`Backend: ${connectionStatus}`}
+          />
+          
+          {/* Files button - Added next to New Chat */}
+          <Button 
+            variant="outline" 
+            size="sm" 
+            onClick={() => setShowFileSelector(true)}
+            className="text-xs flex items-center gap-1"
+            title="Select Files"
+          >
+            <FileText className="h-3 w-3" />
+            <span className="hidden sm:inline">Files</span>
+          </Button>
+          
+          {/* Keep the New Chat button */}
+          <Button 
+            variant="outline" 
+            size="sm" 
+            onClick={startNewSession}
+            className="text-xs flex items-center gap-1"
+          >
+            <PlusCircle className="h-3 w-3" />
+            <span className="hidden sm:inline">New Chat</span>
+            <span className="sm:hidden">New</span>
+          </Button>
+        </div>
+      </div>
+
+      {/* Messages container */}
+      <div className="flex-1 overflow-y-auto p-2 md:p-4 space-y-4 messages-container no-scrollbar border-x border-gray-800 backdrop-blur-md bg-black-600/10" ref={messagesContainerRef}>
+        {messages.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full text-gray-400">
+            <p>No messages yet. Start a conversation!</p>
+          </div>
+        ) : (
+          <div className="flex flex-col space-y-3">
+            {messages.map((message) => (
+              <div 
+                key={message.id} 
+                className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'} mb-3 w-full`}
+              >
+                <div 
+                  className={`message-bubble max-w-[60%] p-3 shadow-sm
+                    ${message.sender === 'user' 
+                      ? 'bg-stone-600 text-white rounded-2xl rounded-br-none ml-auto' 
+                      : 'bg-stone-900 text-gray-200 rounded-2xl rounded-bl-none mr-auto border border-stone-700'
+                    }`}
+                >
+                  {message.sender === 'user' ? (
+                    <p className="whitespace-pre-wrap text-sm">{message.content}</p>
+                  ) : (
+                    <div className="html-content text-sm" dangerouslySetInnerHTML={{ __html: message.content }} />
+                  )}
+                  <div className={`text-[10px] mt-1 opacity-70 ${message.sender === 'user' ? 'text-right' : ''}`}>
+                    {new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="messages-end-anchor h-4" ref={messagesEndRef} />
+      </div>
+      
+      {/* Message input */}
+      <CardFooter className="p-2 border border-gray-800 bg-black">
+        <form onSubmit={handleSendMessage} className="flex w-full items-center gap-1">
           <div className="relative">
             <Button 
               type="button" 
               variant="outline" 
               size="icon" 
-              onClick={onUploadFile} 
+              onClick={openFileSelector} 
+              aria-label="Select files"
+              disabled={connectionStatus !== 'connected'}
+              className="h-7 w-7"
+            >
+              <FolderOpen className="h-3 w-3" />
+            </Button>
+          </div>
+          
+          <div className="relative">
+            <Button 
+              type="button" 
+              variant="outline" 
+              size="icon" 
+              onClick={triggerFileDialog} 
               aria-label="Upload file"
               disabled={isSummarizing || connectionStatus !== 'connected'}
               className={`h-7 w-7 ${(isSummarizing || connectionStatus !== 'connected') ? "opacity-50 cursor-not-allowed" : ""}`}
@@ -1017,20 +1207,18 @@ export default function ChatPageClient({
           </div>
           
           <Input
-            ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onClick={handleInputClick}
             placeholder={
               connectionStatus !== 'connected' 
                 ? "Backend disconnected." 
                 : (isSummarizing ? "Processing..." : "Type your message...")
             }
-            className="flex-1 h-7 text-xs glassmorphic"
+            className="flex-1 h-7 text-xs glassmorphic "
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                onSendMessage(e as unknown as FormEvent);
+                handleSendMessage(e as unknown as FormEvent);
               }
             }}
             disabled={isWaitingForResponse || isSummarizing}
@@ -1050,220 +1238,33 @@ export default function ChatPageClient({
           </Button>
         </form>
       </CardFooter>
-    );
-  }
-  
-  // Store the API service instance globally for non-hook access
-  useEffect(() => {
-    // Store the API service instance globally for non-hook access
-    if (serviceApi) {
-      setGlobalApiService(serviceApi);
-    }
-  }, [serviceApi]);
-  
-  // Update the sendMessage function to ensure messages are added to the UI
-  const sendMessage = async (messageText: string) => {
-    try {
-      // Create user message
-      const newMessage: ChatMessage = {
-        id: uuidv4(),
-        sender: "user",
-        content: messageText,
-        timestamp: Date.now()
-      };
-      
-      // Important: Update the local messages state FIRST before sending
-      // This ensures the user message appears immediately
-      setMessages((prevMessages: ChatMessage[]) => [...prevMessages, newMessage]);
-      
-      console.log("Sending message to backend with parameters:", {
-        message: messageText,
-        selected_files: selectedFilesList,
-        sessionId: chatId
-      });
-      
-      // Call the API
-      const response = await serviceApi.sendChatMessage({
-        message: messageText,
-        selected_files: selectedFilesList,
-        sessionId: chatId
-      });
-      
-      console.log("Response from backend:", response);
-      
-      // After receiving a response, update the messages state with the AI response
-      if (response && response.message) {
-        const assistantMessage: ChatMessage = {
-          id: uuidv4(),
-          sender: "assistant",
-          content: response.message,
-          timestamp: Date.now()
-        };
-        
-        // Update messages with the assistant's response
-        setMessages((prevMessages: ChatMessage[]) => [...prevMessages, assistantMessage]);
-        
-        // If we received all_messages from the backend, use those to ensure consistency
-        if (response.all_messages && Array.isArray(response.all_messages) && response.all_messages.length > 0) {
-          // Transform the messages to match our local format
-          const formattedMessages = response.all_messages.map((msg: any) => ({
-            id: msg.id || uuidv4(),
-            sender: msg.role === "user" ? "user" : "assistant",
-            content: msg.content,
-            timestamp: new Date(msg.timestamp).getTime() || Date.now()
-          }));
-          
-          setMessages(formattedMessages);
-        }
-        
-        // Update chat name if provided
-        if (response.chat_name) {
-          setCurrentSession(prev => prev ? {
-            ...prev,
-            name: response.chat_name || prev.name
-          } : null);
-        }
-      }
-    } catch (error) {
-      console.error("Error in message handling:", error);
-    }
-  };
-  
-  // Effect for loading chat history
-  useEffect(() => {
-    const loadChatHistory = async () => {
-      if (chatId && serviceApi && typeof serviceApi.getChatHistory === 'function') {
-        try {
-          const history = await serviceApi.getChatHistory(chatId);
-          if (history && history.messages && Array.isArray(history.messages)) {
-            // Format messages from history
-            const formattedMessages = history.messages.map((msg: any) => ({
-              id: msg.id || uuidv4(),
-              sender: msg.role === "user" ? "user" : "assistant",
-              content: msg.content,
-              timestamp: new Date(msg.timestamp || Date.now()).getTime()
-            }));
-            
-            setMessages(formattedMessages);
-          }
-        } catch (error) {
-          console.error("Error loading chat history:", error);
-        }
-      }
-    };
-    
-    loadChatHistory();
-  }, [chatId, serviceApi]);
-      
-  // Create a ref for the end of messages to enable auto-scrolling
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  
-  // Auto-scroll to bottom when new messages arrive
-  useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [messages]); // Changed from visibleMessages to messages to fix scroll behavior
-
-  // Render the chat interface
-  return (
-    <div className="flex flex-col h-full">
-      <div className="flex-1 overflow-y-auto p-4 space-y-4 messages-container" ref={messagesContainerRef}>
-        {messages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
-            <p>No messages yet. Start a conversation!</p>
-          </div>
-        ) : (
-          messages.map((message) => (
-            <div 
-              key={message.id} 
-              className={`message ${message.sender === 'user' ? 'user-message' : 'assistant-message'} mb-4`}
-            >
-              <div className="message-content p-3 rounded-lg">
-                {message.sender === 'user' ? (
-                  <p className="whitespace-pre-wrap">{message.content}</p>
-                ) : (
-                  <div 
-                    className="html-content" 
-                    dangerouslySetInnerHTML={{ __html: message.content }} 
-                  />
-                )}
-              </div>
-            </div>
-          ))
-        )}
-        <div className="messages-end-anchor" ref={messagesEndRef} />
-      </div>
-      
-      {/* Message input area */}
-      <form onSubmit={handleSendMessage} className="flex p-4 border-t border-border/50">
-        <div className="flex-1 flex items-center gap-2">
-          <Button 
-            type="button"
-            variant="outline" 
-            size="icon" 
-            onClick={openFileSelector}
-            disabled={connectionStatus !== 'connected' || isWaitingForResponse}
-            title="Select files"
-          >
-            <FolderOpen className="h-4 w-4" />
-            <VisuallyHidden>Select files</VisuallyHidden>
-          </Button>
-          
-          <Button 
-            type="button"
-            variant="outline" 
-            size="icon" 
-            onClick={triggerFileDialog}
-            disabled={connectionStatus !== 'connected' || isWaitingForResponse}
-            title="Upload file"
-          >
-            <Paperclip className="h-4 w-4" />
-            <VisuallyHidden>Upload file</VisuallyHidden>
-          </Button>
-          
-          <Input
-            type="text"
-            placeholder={isWaitingForResponse ? "Waiting for response..." : "Type your message..."}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            disabled={isWaitingForResponse}
-            className="flex-1"
-          />
-          
-          <Button 
-            type="submit" 
-            disabled={!input.trim() || isWaitingForResponse}
-            variant="default"
-            size="icon"
-          >
-            {isWaitingForResponse ? (
-              <LoadingSpinner size="sm" />
-            ) : (
-              <Send className="h-4 w-4" />
-            )}
-            <VisuallyHidden>Send message</VisuallyHidden>
-          </Button>
-        </div>
-      </form>
       
       {/* File selector dialog */}
-      <Dialog open={isFileDialogOpen} onOpenChange={setIsFileDialogOpen}>
-        <DialogContent>
-          <DialogTitle>Select Files</DialogTitle>
-          <FileSelector
-            availableFiles={availableFiles}
-            selectedFiles={selectedFilesList}
-            onSelectionChange={handleFileSelectionChange}
-            isLoading={isLoadingFiles}
-          />
-          <DialogFooter>
-            <Button onClick={() => setIsFileDialogOpen(false)}>Done</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {isFileDialogOpen && (
+        <Dialog open={isFileDialogOpen} onOpenChange={setIsFileDialogOpen}>
+          <DialogContent className="max-w-[95%] w-full sm:max-w-[85%] md:max-w-[75%] lg:max-w-[65%] 
+            max-h-[90vh] sm:max-h-[85vh] mx-auto p-0 rounded-lg overflow-hidden">
+            <DialogHeader className="p-3 sm:p-4 pb-1 sm:pb-2">
+              <DialogTitle className="text-base sm:text-lg">Select Files</DialogTitle>
+              <DialogDescription className="text-xs sm:text-sm">
+                Choose files to use as context for your conversation.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="px-2 sm:px-4 pb-2 sm:pb-4 w-full h-[60vh] sm:h-[65vh] md:h-[70vh] overflow-y-auto">
+              <FileSelector
+                availableFiles={availableFiles}
+                selectedFiles={selectedFilesList}
+                onSelectionChange={handleFileSelectionChange}
+                isLoading={isLoadingFiles}
+                onClose={() => setIsFileDialogOpen(false)}
+                onRefresh={refreshAvailableFiles}
+              />
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
       
-      {/* Hidden file input for uploads */}
+      {/* Hidden file input */}
       <input
         ref={fileInputRef}
         type="file"
@@ -1274,3 +1275,4 @@ export default function ChatPageClient({
     </div>
   );
 }
+

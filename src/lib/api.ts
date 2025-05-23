@@ -21,6 +21,9 @@ export interface FileMetadata { filename: string; description: string; tags: str
 // Track ongoing requests to prevent duplicate calls
 const pendingRequests = new Map<string, Promise<any>>();
 
+// Local chat history storage
+const LOCAL_CHAT_HISTORY_KEY = "nebulaChatHistory";
+
 // Expanded API interface to include missing methods
 export const api = {
     // Add a checkStatus method
@@ -34,42 +37,22 @@ export const api = {
         }
     },
     
-    // Keep only one method for getting chat history to avoid confusion
-    getChatHistory: async (): Promise<ChatData[]> => {
-        // Use cached response if available
-        if (apiCache.has('chatHistory')) {
-            return apiCache.get('chatHistory');
-        }
-        
-        // Check if there's already a pending request
-        if (pendingRequests.has('chatHistory')) {
-            return pendingRequests.get('chatHistory');
-        }
-        
+    // Updated to prioritize local storage and avoid backend calls
+    getChatHistory: async (chatId?: string): Promise<ChatData[]> => {
+        // Always try local storage first
         try {
-            // Create a promise for this request and store it
-            const requestPromise = axiosInstance.get('/chats')
-                .then(response => {
-                    const data: ChatData[] = response.data;
-                    // Cache the response
-                    apiCache.set('chatHistory', data);
-                    // Remove from pending requests
-                    pendingRequests.delete('chatHistory');
-                    return data;
-                })
-                .catch(error => {
-                    console.error('Error fetching chat history:', error);
-                    // Remove from pending requests
-                    pendingRequests.delete('chatHistory');
-                    // Return empty array as fallback
-                    return [];
-                });
+            const localHistory = getLocalChatHistory();
             
-            // Store the pending request
-            pendingRequests.set('chatHistory', requestPromise);
-            return requestPromise;
+            // If specific chat ID requested, filter for just that chat
+            if (chatId && chatId !== 'all') {
+                const specificChat = localHistory.find(chat => chat.id === chatId);
+                return specificChat ? [specificChat] : [];
+            }
+            
+            // Return all local chats
+            return localHistory;
         } catch (error) {
-            console.error('Error creating chat history request:', error);
+            console.error('Error fetching local chat history:', error);
             return [];
         }
     },
@@ -144,14 +127,48 @@ export const api = {
     // Add the critical missing methods
     createNewChat: async () => {
       try {
-        const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://13.202.208.115:3000';
-        const response = await fetch(`${baseUrl}/new-chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' }
-        });
-        if (!response.ok) throw new Error(`API responded with ${response.status}`);
+        // Generate local ID first
+        const localChatId = `chat_${Math.random().toString(36).substring(2, 10)}_${Date.now()}`;
         
-        return await response.json();
+        // Create a new chat session in local storage
+        const newChat = {
+          id: localChatId,
+          title: "New Chat",
+          messages: [],
+          lastUpdated: new Date().toISOString()
+        };
+        
+        // Save to local storage
+        const localHistory = getLocalChatHistory();
+        localHistory.unshift(newChat);
+        saveLocalChatHistory(localHistory);
+        
+        // Try backend creation but don't block on it
+        try {
+          const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://13.202.208.115:3000';
+          const response = await fetch(`${baseUrl}/new-chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+          });
+          
+          if (response.ok) {
+            const data = await response.json();
+            // Update local chat with backend ID if successful
+            if (data && data.chat_id) {
+              const updatedHistory = getLocalChatHistory();
+              const index = updatedHistory.findIndex(chat => chat.id === localChatId);
+              if (index >= 0) {
+                updatedHistory[index].id = data.chat_id;
+                saveLocalChatHistory(updatedHistory);
+              }
+              return data;
+            }
+          }
+        } catch (backendError) {
+          console.warn('Backend chat creation failed, using local only:', backendError);
+        }
+        
+        return { chat_id: localChatId, status: 'local' };
       } catch (error) {
         console.error('Error creating new chat:', error);
         return { chat_id: `chat_${Date.now()}`, status: 'local' };
@@ -160,6 +177,14 @@ export const api = {
     
     sendChatMessage: async (data: any) => {
       try {
+        // Update local chat history first
+        updateLocalChatWithMessage(data.sessionId, {
+          role: "user",
+          content: data.message,
+          timestamp: new Date().toISOString()
+        });
+        
+        // Then try to send to backend
         const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://13.202.208.115:3000';
         const response = await fetch(`${baseUrl}/chat`, {
           method: 'POST',
@@ -173,7 +198,23 @@ export const api = {
         });
         
         if (!response.ok) throw new Error(`API responded with ${response.status}`);
-        return await response.json();
+        const responseData = await response.json();
+        
+        // Update local chat with AI response
+        if (responseData.message) {
+          updateLocalChatWithMessage(data.sessionId, {
+            role: "assistant",
+            content: responseData.message,
+            timestamp: new Date().toISOString()
+          });
+          
+          // Update chat name if provided
+          if (responseData.chat_name) {
+            updateLocalChatName(data.sessionId, responseData.chat_name);
+          }
+        }
+        
+        return responseData;
       } catch (error) {
         console.error('Error sending chat message:', error);
         return { 
@@ -184,6 +225,66 @@ export const api = {
       }
     }
 };
+
+// Helper functions for local chat storage
+function getLocalChatHistory(): ChatData[] {
+  try {
+    if (typeof window === 'undefined') return [];
+    const historyJson = localStorage.getItem(LOCAL_CHAT_HISTORY_KEY);
+    return historyJson ? JSON.parse(historyJson) : [];
+  } catch (error) {
+    console.error("Error loading chat history from localStorage:", error);
+    return [];
+  }
+}
+
+function saveLocalChatHistory(history: ChatData[]): void {
+  try {
+    if (typeof window === 'undefined') return;
+    localStorage.setItem(LOCAL_CHAT_HISTORY_KEY, JSON.stringify(history));
+  } catch (error) {
+    console.error("Error saving chat history to localStorage:", error);
+  }
+}
+
+function updateLocalChatWithMessage(chatId: string, message: any): void {
+  try {
+    const history = getLocalChatHistory();
+    const chatIndex = history.findIndex(chat => chat.id === chatId);
+    
+    if (chatIndex >= 0) {
+      // Add message to existing chat
+      history[chatIndex].messages.push(message);
+      history[chatIndex].lastUpdated = new Date().toISOString();
+    } else {
+      // Create new chat with this message
+      history.unshift({
+        id: chatId,
+        title: "New Chat",
+        messages: [message],
+        lastUpdated: new Date().toISOString()
+      });
+    }
+    
+    saveLocalChatHistory(history);
+  } catch (error) {
+    console.error("Error updating local chat with message:", error);
+  }
+}
+
+function updateLocalChatName(chatId: string, newName: string): void {
+  try {
+    const history = getLocalChatHistory();
+    const chatIndex = history.findIndex(chat => chat.id === chatId);
+    
+    if (chatIndex >= 0) {
+      history[chatIndex].title = newName;
+      saveLocalChatHistory(history);
+    }
+  } catch (error) {
+    console.error("Error updating chat name:", error);
+  }
+}
 
 // Initialize the API integration
 export function initializeApiIntegration(apiService: ApiServiceType): void {
@@ -196,9 +297,6 @@ export function initializeApiIntegration(apiService: ApiServiceType): void {
   
   console.log('API integration initialized with methods:', Object.keys(api));
 }
-
-// Export types for use in other modules
-export type { ChatData, FileMetadata, CacheKey };
 
 // Alternative approach: Re-export the axios instance in case other modules need direct access
 export { axiosInstance };

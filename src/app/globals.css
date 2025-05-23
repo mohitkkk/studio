@@ -68,19 +68,20 @@ body {
     --popover-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
     --primary-from: 336 100% 59%; /* #FF297F - Pink */
     --primary-to: 217 100% 62%; /* #4B8FFF - Blue */
-    --primary: 336 100% 59%; /* #FF297F - Pink */
+    --primary: 217 100% 62%; /* #4B8FFF - Blue */
     --primary-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
     --secondary: 0 0% 7.1%; /* #121212 - Rich Black */
     --secondary-foreground: 0 0% 70.2%; /* #B3B3B3 - Silver */
     --muted: 0 0% 11.8%; /* #1E1E1E - Eerie Black */
     --muted-foreground: 0 0% 40%; /* #666666 - Dim Gray */
-    --accent: 336 100% 59%; /* #FF297F - Pink */
+    --accent: 217 100% 65%; /* #4B8FFF - Blue */
     --accent-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
     --destructive: 0 100% 65%; /* #FF4C4C - Coral Red */
     --destructive-foreground: 0 0% 100%; /* #FFFFFF - Pure White */
     --border: 0 0% 20%; /* #333333 - Dark Charcoal */
     --input: 0 0% 11.8%; /* #1E1E1E - Eerie Black */
-    --ring: 336 100% 59%; /* #FF297F - Pink - matches the gradient start color */
+    --ring: 217 100% 62%; /* #4B8FFF - Blue */
+
 
 
     --sidebar-background: 0 0% 0%; /* #000000 - Pure Black */
@@ -100,13 +101,13 @@ body {
     @apply bg-background text-foreground;
     /* Apply dark theme by default */
     @apply dark;
-    @apply overflow-y-auto;
+    @apply overflow-y-hidden;
   }
 }
 
 /* Glassmorphism utility */
 .glassmorphic {
-  background: rgba(255, 255, 255, 0.05); /* Subtle white tint - Translucent White */
+  background: rgba(255, 255, 255, 0.05); 
   backdrop-filter: blur(10px) saturate(180%);
   -webkit-backdrop-filter: blur(10px) saturate(180%);
   /* border: 1px solid rgba(255, 255, 255, 0.1); /* Subtle border - Translucent White */
@@ -242,6 +243,30 @@ body {
   overflow-anchor: auto;
 }
 
+.border-gradient-animated::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  padding: 1px;
+  border-radius: 0.5rem;
+  background: linear-gradient(270deg, #F20C1F, #F2308B, #7FBF3F, #F29829, #0D0D0D);
+  background-size: 600% 600%;
+  animation: borderWave 8s linear infinite;
+  z-index: 0;
+  -webkit-mask: 
+    linear-gradient(#fff 0 0) content-box, 
+    linear-gradient(#fff 0 0);
+  mask: 
+    linear-gradient(#fff 0 0) content-box, 
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+}
+
+.group:hover .border-gradient-animated::before {
+  background: linear-gradient(270deg, #4B8FFF, #FF297F, #00c853);
+}
+
 @keyframes gradient {
 
   0% { background-position: 0% 50%; }
@@ -250,4 +275,260 @@ body {
 
   100% { background-position: 0% 50%; }
 
+}
+
+@keyframes borderWave {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+/* Enhanced no-scroll utilities */
+@layer utilities {
+  /* Hide scrollbar but keep functionality */
+  /* Hide scrollbar but keep functionality */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+  
+  /* macOS-like minimal scrollbar */
+  .mac-scrollbar::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  
+  .mac-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  
+  .mac-scrollbar::-webkit-scrollbar-thumb {
+    background-color: rgba(155, 155, 155, 0.5);
+    border-radius: 20px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  
+  .mac-scrollbar::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(155, 155, 155, 0.7);
+  }
+  
+  /* For Firefox */
+  .mac-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(155, 155, 155, 0.5) transparent;
+  }
+
+  
+  .no-scrollbar {
+    -ms-overflow-style: none;  /* IE and Edge */
+    scrollbar-width: none;  /* Firefox */
+  }
+
+  /* Completely prevent scrolling */
+  .prevent-scroll {
+    overflow: hidden !important;
+    overscroll-behavior: none !important;
+  }
+  
+  /* Fixed layout container */
+  .fixed-layout {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100vh;
+    overflow: hidden;
+  }
+}
+
+/* Global overrides to prevent unwanted scrolling */
+body,
+html {
+  overscroll-behavior: none;
+  overflow-x: hidden;
+  height: 100%;
+}
+
+/* Chat interface container */
+.chat-interface-container {
+  position: relative;
+  height: 100vh;
+  max-height: 100vh;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+/* Fix for child container that should scroll */
+.chat-messages-scrollable {
+  height: calc(100vh - 140px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  position: relative;
+}
+
+/* Make dialog content responsive */
+.responsive-dialog-content {
+  max-width: 90vw;
+  width: 100%;
+  margin: 0 auto;
+}
+
+@media (min-width: 640px) {
+  .responsive-dialog-content {
+    max-width: 80vw;
+  }
+}
+
+@media (min-width: 768px) {
+  .responsive-dialog-content {
+    max-width: 700px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .responsive-dialog-content {
+    max-width: 900px;
+  }
+}
+
+.markdown-content {
+  width: 100%;
+  font-size: 0.875rem;
+  overflow-x: auto;
+  color: hsl(var(--muted-foreground));
+}
+
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4,
+.markdown-content h5,
+.markdown-content h6 {
+  color: hsl(var(--foreground));
+  margin-top: 1em;
+  margin-bottom: 0.5em;
+  font-weight: 600;
+}
+
+.markdown-content h1 { font-size: 1.5rem; }
+.markdown-content h2 { font-size: 1.25rem; }
+.markdown-content h3 { font-size: 1.125rem; }
+.markdown-content h4 { font-size: 1rem; }
+
+.markdown-content p {
+  margin-bottom: 0.75em;
+  line-height: 1.5;
+}
+
+.markdown-content ul, 
+.markdown-content ol {
+  padding-left: 1.5rem;
+  margin-bottom: 0.75em;
+}
+
+.markdown-content ul {
+  list-style-type: disc;
+}
+
+.markdown-content ol {
+  list-style-type: decimal;
+}
+
+.markdown-content li {
+  margin-bottom: 0.25em;
+}
+
+.markdown-content code {
+  font-family: var(--font-mono, monospace);
+  background-color: hsl(var(--muted));
+  padding: 0.2em 0.4em;
+  border-radius: 0.25rem;
+  font-size: 0.85em;
+  color: hsl(var(--foreground));
+}
+
+.markdown-content pre {
+  background-color: hsl(var(--muted));
+  border-radius: 0.5rem;
+  padding: 1rem;
+  margin: 1rem 0;
+  overflow-x: auto;
+}
+
+.markdown-content pre code {
+  background-color: transparent;
+  padding: 0;
+  border-radius: 0;
+}
+
+.markdown-content blockquote {
+  border-left: 4px solid hsl(var(--primary));
+  padding-left: 1rem;
+  margin-left: 0;
+  margin-bottom: 1rem;
+  color: hsl(var(--muted-foreground));
+}
+
+.markdown-content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+}
+
+.markdown-content th,
+.markdown-content td {
+  border: 1px solid hsl(var(--border));
+  padding: 0.5rem;
+  text-align: left;
+}
+
+.markdown-content th {
+  background-color: hsl(var(--muted));
+}
+
+/* Connection status indicator styling */
+.connection-status {
+  position: relative;
+  display: flex;
+  align-items: center;
+  font-size: 0.75rem;
+}
+
+.connection-status::before {
+  content: "";
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 4px;
+}
+
+.connection-status.connected::before {
+  background-color: rgb(34, 197, 94);
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.8);
+}
+
+.connection-status.disconnected::before {
+  background-color: rgb(239, 68, 68);
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.8);
+}
+
+.connection-status.connecting::before {
+  background-color: rgb(234, 179, 8);
+  box-shadow: 0 0 6px rgba(234, 179, 8, 0.8);
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.5;
+  }
 }

@@ -27,4 +27,45 @@ const TooltipContent = React.forwardRef<
 ))
 TooltipContent.displayName = TooltipPrimitive.Content.displayName
 
-export { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider }
+interface TooltipProps {
+  children: React.ReactNode
+  content: React.ReactNode
+  side?: "top" | "right" | "bottom" | "left"
+  align?: "start" | "center" | "end"
+  delay?: number
+  className?: string
+}
+
+export function TooltipWrapper({
+  children,
+  content,
+  side = "top",
+  align = "center",
+  delay = 300,
+  className,
+}: TooltipProps) {
+  return (
+    <TooltipProvider delayDuration={delay}>
+      <TooltipPrimitive.Root>
+        <TooltipTrigger asChild>
+          <span>{children}</span>
+        </TooltipTrigger>
+        <TooltipPrimitive.Portal>
+          <TooltipContent
+            side={side}
+            align={align}
+            className={cn(
+              "z-50 overflow-hidden rounded-md bg-gray-800 px-3 py-1.5 text-xs text-white animate-in fade-in-0 zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 max-w-[300px] break-words",
+              className
+            )}
+          >
+            {content}
+            <TooltipPrimitive.Arrow className="fill-gray-800" />
+          </TooltipContent>
+        </TooltipPrimitive.Portal>
+      </TooltipPrimitive.Root>
+    </TooltipProvider>
+  )
+}
+
+export { TooltipTrigger, TooltipContent, TooltipProvider, Tooltip }

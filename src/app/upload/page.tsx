@@ -7,16 +7,18 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { UploadCloud, FileText, Trash2 } from "lucide-react";
 import LoadingSpinner from "@/components/ui/loading-spinner";
-import { summarizeDocument, SummarizeDocumentInput } from "@/ai/flows/summarize-document";
-import { useToast } from "@/hooks/use-toast";
+import axios from 'axios';
+
+// Get API URL from environment variables with fallback
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://13.202.208.115:3000';
 
 export default function FileUploadPage() {
   const [file, setFile] = useState<File | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [summary, setSummary] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [filePreview, setFilePreview] = useState<string | null>(null); // For text files
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { toast } = useToast();
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const selectedFile = event.target.files?.[0];
@@ -24,6 +26,7 @@ export default function FileUploadPage() {
       setFile(selectedFile);
       setSummary(null); // Clear previous summary
       setFilePreview(null); // Clear previous preview
+      setError(null); // Clear previous error
 
       // Preview for text files
       if (selectedFile.type === "text/plain") {
@@ -36,60 +39,48 @@ export default function FileUploadPage() {
 
   const handleSummarize = async () => {
     if (!file) {
-      toast({ title: "No file selected", description: "Please select a file to summarize.", variant: "destructive" });
+      setError('Please select a file first');
       return;
     }
 
-    setIsProcessing(true);
-    setSummary(null);
-
     try {
-      const reader = new FileReader();
-      reader.onload = async (e) => {
-        const fileDataUri = e.target?.result as string;
-        const input: SummarizeDocumentInput = { documentDataUri: fileDataUri };
-        const output = await summarizeDocument(input);
-        setSummary(output.summary);
-        toast({ title: "Summarization Complete", description: `Summary generated for ${file.name}.` });
-      };
-      reader.readAsDataURL(file);
-    } catch (error) {
-      console.error("Error summarizing document:", error);
-      setSummary("Failed to generate summary.");
-      toast({ title: "Summarization Error", description: "An error occurred while summarizing the document.", variant: "destructive" });
-    } finally {
-      // FileReader is async, so setIsProcessing might be better inside onload's finally, but for simplicity:
-      // We'll set it to false once the process starts, UI will update with summary when ready.
-      // Better: await the promise from reader.onload if it returned one.
-      // For now, rely on summary state to show result.
-      // A more robust way:
-      const processFile = new Promise<void>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = async (e) => {
-          try {
-            const fileDataUri = e.target?.result as string;
-            const input: SummarizeDocumentInput = { documentDataUri: fileDataUri };
-            const output = await summarizeDocument(input);
-            setSummary(output.summary);
-            toast({ title: "Summarization Complete", description: `Summary generated for ${file.name}.` });
-            resolve();
-          } catch (err) {
-            reject(err);
-          }
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
+      setIsProcessing(true);
+      setError(null);
+      const fileToUpload = file;
+      
+      // Use FormData for file upload
+      const formData = new FormData();
+      formData.append('file', fileToUpload);
+      
+      // Directly use axios to upload to our API server - no server action
+      console.log(`Uploading file to ${API_URL}/upload`);
+      const uploadResponse = await axios.post(`${API_URL}/upload`, formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
       });
-
-      try {
-        await processFile;
-      } catch (error) {
-        console.error("Error processing or summarizing document:", error);
-        setSummary("Failed to generate summary.");
-        toast({ title: "Processing Error", description: "An error occurred.", variant: "destructive" });
-      } finally {
-        setIsProcessing(false);
+      
+      if (!uploadResponse.data || !uploadResponse.data.filename) {
+        throw new Error('File upload failed - no filename returned');
       }
+      
+      const fileId = uploadResponse.data.filename;
+      
+      // Now process the document directly with our API
+      const processResponse = await axios.post(`${API_URL}/process`, {
+        filename: fileId
+      });
+      
+      if (processResponse.data && processResponse.data.summary) {
+        setSummary(processResponse.data.summary);
+      } else {
+        throw new Error('No summary returned from processing service');
+      }
+    } catch (err) {
+      console.error('Error processing or summarizing document:', err);
+      setError(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setIsProcessing(false);
     }
   };
 

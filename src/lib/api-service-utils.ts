@@ -73,8 +73,8 @@ export function getApiService(): ApiServiceType {
       },
       updateFileSelection: async (params: any) => {
         try {
-          if (api.updateFileSelection) {
-            return await api.updateFileSelection(params);
+          if ('updateFileSelection' in api) {
+            return await (api as any).updateFileSelection(params);
           }
           
           // Fallback direct implementation
@@ -103,8 +103,8 @@ export function getApiService(): ApiServiceType {
       } : async () => ({ success: false }),
       uploadFile: async (file: File, onProgress) => {
         try {
-          if (api.uploadFile) {
-            return await api.uploadFile(file, onProgress);
+          if ('uploadFile' in api) {
+            return await (api as any).uploadFile(file, onProgress);
           }
           
           // Fallback implementation
@@ -133,8 +133,8 @@ export function getApiService(): ApiServiceType {
       },
       processDocument: async (params) => {
         try {
-          if (api.processDocument) {
-            return await api.processDocument(params);
+          if ('processDocument' in api) {
+            return await (api as any).processDocument(params);
           }
           
           // Fallback implementation

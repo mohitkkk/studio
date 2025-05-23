@@ -17,13 +17,13 @@ export type ApiServiceType = {
   updateFileSelection: (params: any) => Promise<any>;
   clearCache: () => Promise<any>;
   uploadFile: (file: File, onProgress?: (progress: number) => void) => Promise<any>;
-  processDocument: (params: any) => Promise<any>;
+  processDocument: (params: any) => Promise<ProcessDocumentResponse>;
 };
 
 export interface FileUploadResponse {
   fileId: string;
   fileName: string;
-  status?: string;
+  status: string;
 }
 
 export interface ProcessDocumentResponse {
@@ -54,23 +54,23 @@ let lastProps: ApiServiceProps | undefined;
 const FALLBACK_METHODS = {
   checkStatus: async () => ({ status: 'error', message: 'Method not implemented' }),
   getFiles: async () => ({ files: [], count: 0 }),
-  getChatHistory: async () => ({ messages: [] }),
+  getChatHistory: async (chatId: string) => ({ messages: [] }),
   createChatSession: async () => ({ chat_id: `fallback_${Date.now()}` }),
   sendChatMessage: async (params: any) => ({
     message: 'API service is initializing. Please try again in a moment.',
     status: 'error',
     client_id: params?.sessionId || 'fallback'
   }),
-  updateFileSelection: async () => ({ status: 'error', message: 'Using global fallback' }),
+  updateFileSelection: async (params: { sessionId: string; files: string[] }) => ({ status: 'error', message: 'Using global fallback' }),
   clearCache: async () => ({ success: false }),
-  uploadFile: async () => ({ 
+  uploadFile: async (file: File, onProgress?: (progress: number) => void) => ({ 
     fileId: 'error', 
     fileName: 'error', 
     status: 'error' 
   }),
-  processDocument: async () => ({ 
+  processDocument: async (params: any): Promise<ProcessDocumentResponse> => ({ 
     summary: null, 
-    fileId: 'error', 
+    fileId: params?.fileId || 'error', 
     status: 'error' 
   })
 };
@@ -79,7 +79,7 @@ const FALLBACK_METHODS = {
 const GLOBAL_FALLBACK_INSTANCE: ApiServiceType = {
   checkStatus: async () => ({ status: 'error', message: 'Using global fallback' }),
   getFiles: async () => ({ files: [], count: 0 }),
-  getChatHistory: async () => ({ messages: [] }),
+  getChatHistory: async (chatId: string) => ({ messages: [] }),
   createChatSession: async () => ({ chat_id: `fallback_${Date.now()}` }),
   sendChatMessage: async (params: any) => ({
     message: 'API service is initializing. Please try again in a moment.',
@@ -93,7 +93,7 @@ const GLOBAL_FALLBACK_INSTANCE: ApiServiceType = {
     fileName: 'error', 
     status: 'error' 
   }),
-  processDocument: async () => ({ 
+  processDocument: async (): Promise<ProcessDocumentResponse> => ({ 
     summary: null, 
     fileId: 'error', 
     status: 'error' 
@@ -392,7 +392,7 @@ export function createApiService(props?: ApiServiceProps): ApiServiceType {
     };
     
     // File upload function
-    service.uploadFile = async (file: File, progressCallback?: (progress: number) => void): Promise<FileUploadResponse> => {
+    service.uploadFile = async (file: File, onProgress?: (progress: number) => void): Promise<FileUploadResponse> => {
       try {
         // Create FormData object
         const formData = new FormData();
@@ -401,20 +401,20 @@ export function createApiService(props?: ApiServiceProps): ApiServiceType {
         // Configure axios with progress tracking
         const config = {
           onUploadProgress: (progressEvent: AxiosProgressEvent) => {
-            if (progressCallback && progressEvent.total) {
+            if (onProgress && progressEvent.total) {
               const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-              progressCallback(percentCompleted);
+              onProgress(percentCompleted);
             }
           }
         };
         
-        // Send the file to backend
+        // Send the file to backend - Use baseUrl consistently instead of hardcoding URL
         const response = await axios.post(`${baseUrl}/upload`, formData, config);
         
         return {
           fileId: response.data.filename, // Backend returns the stored filename 
           fileName: response.data.filename,
-          status: response.data.status
+          status: response.data.status || 'completed'
         };
       } catch (error) {
         console.error("Error uploading file:", error);

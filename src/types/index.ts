@@ -9,13 +9,17 @@ export interface ChatMessage {
 export interface ChatSession {
   id: string;
   name: string;
-  messages: ChatMessage[];
+  messages: Array<{
+    id: string;
+    sender: "user" | "assistant";
+    content: string;
+    timestamp: number;
+    citations?: string[];
+    error?: boolean;
+  }>;
+  selectedFiles?: string[]; // Add this property
   lastModified: number;
-  selectedFiles?: string[]; // Add this field for storing selected files
   documentContext?: {
-    fileName?: string;
-    fileId?: string;
-    fileType?: string;
     summary?: string;
   };
 }

@@ -102,9 +102,9 @@ export function ChatInterface({
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="chat-interface-container fixed-layout prevent-scroll">
       {/* Main chat area with messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div className="chat-messages-scrollable no-scrollbar flex-1 p-4 space-y-4">
         {messages.length === 0 ? (
           <div className="flex items-center justify-center h-full">
             <div className="text-center space-y-2">
@@ -131,7 +131,7 @@ export function ChatInterface({
       </div>
       
       {/* Input area and upload button */}
-      <div className="border-t p-4">
+      <div className="chat-input-area border-t p-4">
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
           {/* Single upload button instead of selected files section */}
           <div className="flex justify-end">
@@ -147,7 +147,7 @@ export function ChatInterface({
             </Button>
           </div>
           
-          <div className="flex gap-2">
+          <div className="flex gap-2 ">
             <Textarea
               value={inputMessage}
               onChange={(e) => setInputMessage(e.target.value)}
